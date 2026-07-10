@@ -17,6 +17,8 @@ export interface CodexLoginResult {
   message: string;
 }
 
+class SafeCodexLoginError extends Error {}
+
 export async function performCodexLogin(options: {
   ctx: ExtensionCommandContext;
   label?: string;
@@ -43,7 +45,12 @@ export async function performCodexLogin(options: {
     credentials = await (options.login ?? loginOpenAICodex)({
       originator: "pi-quota-router",
       onAuth: ({ url }) => {
-        const validatedUrl = validateAuthorizationUrl(url);
+        let validatedUrl: string;
+        try {
+          validatedUrl = validateAuthorizationUrl(url);
+        } catch {
+          throw new SafeCodexLoginError("Unexpected Codex authorization URL");
+        }
         authorizationAction = presentAuthorizationActions(
           options.ctx,
           validatedUrl,
@@ -63,6 +70,11 @@ export async function performCodexLogin(options: {
         );
       },
     });
+  } catch (error) {
+    if (error instanceof SafeCodexLoginError) {
+      throw error;
+    }
+    throw new SafeCodexLoginError("Codex login failed. Please try again.");
   } finally {
     manualPromptAbort.abort();
   }
@@ -158,7 +170,7 @@ async function promptForAuthorizationCode(
 ): Promise<string> {
   const value = await ctx.ui.input(message, placeholder, signal ? { signal } : undefined);
   if (value === undefined) {
-    throw new Error("Codex login was cancelled");
+    throw new SafeCodexLoginError("Codex login was cancelled");
   }
   return value;
 }

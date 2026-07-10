@@ -132,6 +132,29 @@ describe("Codex command login", () => {
       expect(harness.added).toEqual([]);
     }
   });
+
+  test("does not expose upstream OAuth token responses", async () => {
+    const harness = createLoginHarness(OPEN_ACTION);
+    const accessToken = harness.credentials.access;
+    const refreshToken = harness.credentials.refresh;
+
+    const failure = performCodexLogin({
+      ...harness.options,
+      login: async () => {
+        throw new Error(
+          `OpenAI Codex token exchange response missing fields: ${JSON.stringify({
+            access_token: accessToken,
+            refresh_token: refreshToken,
+          })}`,
+        );
+      },
+    });
+
+    await expect(failure).rejects.toThrow("Codex login failed. Please try again.");
+    await expect(failure).rejects.not.toThrow(accessToken);
+    await expect(failure).rejects.not.toThrow(refreshToken);
+    expect(harness.added).toEqual([]);
+  });
 });
 
 function createLoginHarness(

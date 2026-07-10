@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { chmod } from "node:fs/promises";
-import type { AssistantMessageEvent, Context, Model } from "@earendil-works/pi-ai";
+import type {
+  AssistantMessageEvent,
+  Context,
+  Model,
+  SimpleStreamOptions,
+} from "@earendil-works/pi-ai";
 import { OPENAI_CODEX_MODELS } from "@earendil-works/pi-ai/providers/openai-codex.models";
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { deriveManagedAccountId } from "../../src/accounts/account-identity.ts";
@@ -503,6 +508,35 @@ describe("RouterController", () => {
     await controller.shutdown();
   });
 
+  test("propagates caller aborts during usage collection", async () => {
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    const cancellation = new AbortController();
+    const controller = await createRouterController({
+      paths: resolveRouterPaths(fixture.directory),
+      clock: () => 2_000_000_000_000,
+      oauth: { refresh: async () => makeCredentials("account-1", 3_000_000_000_000) },
+      fetchImpl: async (_input, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), {
+            once: true,
+          });
+          cancellation.abort(new Error("SIGINT"));
+        }),
+      baseStream: () => eventStream(successfulText()),
+    });
+    await controller.vault.addFromOAuth("work", makeCredentials("account-1", 3_000_000_000_000));
+
+    const events = await collectController(controller, { signal: cancellation.signal });
+
+    expect(events).toHaveLength(1);
+    expect(events[0]?.type).toBe("error");
+    if (events[0]?.type === "error") {
+      expect(events[0].error.errorMessage).toBe("SIGINT");
+    }
+    await controller.shutdown();
+  });
+
   test("refreshes exhausted usage before deriving a quota block", async () => {
     const fixture = await createStorageFixture();
     cleanups.push(fixture.cleanup);
@@ -851,6 +885,97 @@ describe("RouterController", () => {
     await controller.shutdown();
   });
 
+  test("restores a manual account label after restart", async () => {
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    const options = {
+      paths: resolveRouterPaths(fixture.directory),
+      clock: () => 2_000_000_000_000,
+      oauth: { refresh: async () => makeCredentials("account-1", 3_000_000_000_000) },
+      fetchImpl: async () => Response.json(completeUsageResponse),
+      baseStream: () => eventStream(successfulText()),
+    };
+    const first = await createRouterController(options);
+    const accountId = await first.vault.addFromOAuth(
+      "work",
+      makeCredentials("account-1", 3_000_000_000_000),
+    );
+    await first.operations.use(accountId);
+    await first.shutdown();
+
+    const second = await createRouterController(options);
+
+    expect(await second.operations.status()).toBe("Codex · work · manual");
+    await second.shutdown();
+  });
+
+  test("restores the persisted selected account label after restart", async () => {
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    const options = {
+      paths: resolveRouterPaths(fixture.directory),
+      clock: () => 2_000_000_000_000,
+      oauth: { refresh: async () => makeCredentials("account-1", 3_000_000_000_000) },
+      fetchImpl: async () => Response.json(completeUsageResponse),
+      baseStream: () => eventStream(successfulText()),
+    };
+    const first = await createRouterController(options);
+    await first.vault.addFromOAuth("work", makeCredentials("account-1", 3_000_000_000_000));
+    await collectController(first);
+    await first.shutdown();
+
+    const second = await createRouterController(options);
+
+    expect(await second.operations.status()).toContain("Codex · work ·");
+    expect(await second.operations.status()).toEndWith("· auto");
+    await second.shutdown();
+  });
+
+  test("reports automatic routing after restart when the vault has accounts", async () => {
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    const options = {
+      paths: resolveRouterPaths(fixture.directory),
+      clock: () => 2_000_000_000_000,
+      oauth: { refresh: async () => makeCredentials("account-1", 3_000_000_000_000) },
+      fetchImpl: async () => Response.json(completeUsageResponse),
+      baseStream: () => eventStream(successfulText()),
+    };
+    const first = await createRouterController(options);
+    await first.vault.addFromOAuth("work", makeCredentials("account-1", 3_000_000_000_000));
+    await first.shutdown();
+
+    const second = await createRouterController(options);
+
+    expect(await second.operations.status()).toBe("Codex · none · auto");
+    await second.shutdown();
+  });
+
+  test("reports login after restart when manual configuration outlives the vault account", async () => {
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    const options = {
+      paths: resolveRouterPaths(fixture.directory),
+      clock: () => 2_000_000_000_000,
+      oauth: { refresh: async () => makeCredentials("account-1", 3_000_000_000_000) },
+      fetchImpl: async () => Response.json(completeUsageResponse),
+      baseStream: () => eventStream(successfulText()),
+    };
+    const first = await createRouterController(options);
+    const accountId = await first.vault.addFromOAuth(
+      "work",
+      makeCredentials("account-1", 3_000_000_000_000),
+    );
+    await first.operations.use(accountId);
+    await first.vault.remove(accountId);
+    await first.shutdown();
+
+    const second = await createRouterController(options);
+
+    expect(await second.operations.status()).toBe("Codex · none · login");
+    await second.shutdown();
+  });
+
   test("persists usage for restart fallback and reconciles estimated blocks", async () => {
     const fixture = await createStorageFixture();
     cleanups.push(fixture.cleanup);
@@ -937,10 +1062,13 @@ describe("RouterController", () => {
   });
 });
 
-async function collectController(controller: Awaited<ReturnType<typeof createRouterController>>) {
+async function collectController(
+  controller: Awaited<ReturnType<typeof createRouterController>>,
+  options?: SimpleStreamOptions,
+) {
   const model = Object.values(OPENAI_CODEX_MODELS)[0] as Model<"openai-codex-responses">;
   const events: AssistantMessageEvent[] = [];
-  for await (const event of controller.routedStream(model, { messages: [] } as Context)) {
+  for await (const event of controller.routedStream(model, { messages: [] } as Context, options)) {
     events.push(event);
   }
   return events;

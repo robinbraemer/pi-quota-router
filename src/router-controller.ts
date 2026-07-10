@@ -358,9 +358,14 @@ export async function createRouterController(
   });
 
   const statusText = async (): Promise<string> => {
-    const [config, accounts] = await Promise.all([configStore.read(), vault.list()]);
+    const [config, accounts, state] = await Promise.all([
+      configStore.read(),
+      vault.list(),
+      stateStore.read(),
+    ]);
     cachedConfig = config;
-    const statusAccountId = config.manualAccountId ?? displayAccountId ?? accounts[0]?.id;
+    const statusAccountId =
+      config.manualAccountId ?? displayAccountId ?? state.lastSelection?.accountId ?? accounts[0]?.id;
     const displayAccount = accounts.find((account) => account.id === statusAccountId);
     const snapshot = statusAccountId ? usage.peek(statusAccountId) : undefined;
     return formatCompactStatus({
@@ -425,7 +430,7 @@ export async function createRouterController(
         ...(label ? { label } : {}),
         vault,
         ...(options.login ? { login: options.login } : {}),
-        onAccountAdded: async ({ id, label: addedLabel }) => {
+        onAccountAdded: async ({ id }) => {
           await stateStore.update((state) => ({
             ...state,
             blocks: state.blocks.filter((block) => block.accountId !== id || block.kind !== "auth"),
