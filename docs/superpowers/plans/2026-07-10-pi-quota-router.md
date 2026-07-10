@@ -16,7 +16,7 @@
 - Use only public package exports from @earendil-works/pi-ai and @earendil-works/pi-coding-agent.
 - Never read or mutate Pi's auth.json.
 - Never log, persist outside the vault, or expose access tokens, refresh tokens, JWT payloads, or raw account ids.
-- A synthetic primer is allowed only after both persisted confirmation flags are true.
+- A synthetic primer is allowed only after both interactive confirmations for that one invocation; the command must not persist automatic-priming authorization.
 - A stream retry is allowed only before text, thinking, or tool-call content begins.
 - Every state mutation must be atomic under a cross-process lock.
 - Commit after each task only when the named tests and checks pass.
@@ -264,7 +264,7 @@ Cover:
 - refresh five minutes before expiry;
 - concurrent in-process refresh calls invoke OAuth once;
 - cross-process refresh lock reloads and reuses a peer's newer token;
-- invalid_grant marks needsReauth;
+- invalid_grant marks needsReauth only if the rejected credential is still current;
 - a network error applies a transient result without invalidation;
 - thrown messages never contain supplied tokens.
 
@@ -641,11 +641,12 @@ Prove:
 - candidate requires fresh 0% in both windows and no weekly reset;
 - foreground activity prevents a primer from starting;
 - primer sweep lease prevents two Pi processes from priming;
-- accounts run sequentially;
+- one confirmed command sends at most one provider request, even when scanning all accounts;
 - request contains no history or tools, exact prompt ".", lowest supported reasoning, and smallest output budget;
-- usage is force-refreshed after success;
+- usage is force-refreshed after every non-aborted provider attempt, including failure;
 - only an observed weekly reset marks confirmed;
-- inconclusive/failure applies one-hour cooldown;
+- a provider failure remains failed even when the usage observation confirms the account;
+- inconclusive/failure without an observed reset applies one-hour cooldown;
 - shutdown aborts work and releases both leases.
 
 **Step 2: Confirm the red state**
@@ -657,7 +658,7 @@ Run:
 
 Expected: module-not-found failures.
 
-**Step 3: Implement an idle-only controller**
+**Step 3: Implement an idle-only, one-shot controller**
 
     export interface PrimingController {
       scheduleSweep(reason: "startup" | "manual" | "idle"): void;
@@ -667,6 +668,8 @@ Expected: module-not-found failures.
     }
 
 The synthetic request uses the same current model as Pi, never switches models, and bypasses normal routing only after explicitly reserving the target account.
+
+Command confirmations authorize only the current invocation. They do not persist the automatic-priming flags, and normal agent settlement does not schedule a sweep. The `all` selector may skip ineligible accounts but stops after the first actual primer request and its forced usage refresh.
 
 **Step 4: Verify and commit**
 
@@ -968,7 +971,7 @@ Using throwaway test accounts only:
 5. run a prompt and confirm model/thinking identity is unchanged;
 6. simulate one pre-output quota failure and verify a single rotation;
 7. confirm no rotation occurs after visible output;
-8. enable and confirm priming, then verify one untouched account obtains an observed weekly reset;
+8. confirm one-shot priming, then verify exactly one untouched account obtains an observed weekly reset and no background primer is scheduled;
 9. run two Pi processes and verify distinct leases;
 10. inspect permissions and redacted logs.
 

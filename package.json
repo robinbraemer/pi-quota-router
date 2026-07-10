@@ -1,0 +1,53 @@
+{
+  "name": "@robinbraemer/pi-quota-router",
+  "version": "0.1.0",
+  "description": "Quota-aware multi-account routing for normal Pi",
+  "keywords": [
+    "pi-package"
+  ],
+  "type": "module",
+  "main": "./src/index.ts",
+  "packageManager": "bun@1.3.7",
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "test": "bun test",
+    "lint": "biome check .",
+    "typecheck": "tsgo --noEmit",
+    "check": "bun run lint && bun run typecheck && bun test",
+    "audit": "bun audit --prod --audit-level=high",
+    "check:secrets": "bun run scripts/check-secrets.ts",
+    "smoke:install": "bun run scripts/smoke-install.ts",
+    "pack:check": "bun pm pack --dry-run --ignore-scripts"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "dependencies": {
+    "proper-lockfile": "4.1.2",
+    "zod": "4.3.6"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.3",
+    "@earendil-works/pi-ai": "0.80.6",
+    "@earendil-works/pi-coding-agent": "0.80.6",
+    "@earendil-works/pi-tui": "0.80.6",
+    "@types/bun": "1.3.14",
+    "@types/node": "26.1.1",
+    "@types/proper-lockfile": "4.1.4",
+    "@typescript/native-preview": "7.0.0-dev.20260707.2"
+  },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  }
+}

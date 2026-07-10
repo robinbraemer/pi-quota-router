@@ -1,0 +1,159 @@
+import { describe, expect, test } from "bun:test";
+import { defaultConfig } from "../../src/config.ts";
+import { selectAccount, weeklyUrgency } from "../../src/routing/selection-policy.ts";
+import { candidate, usage } from "../fixtures/candidates.ts";
+
+const NOW = 2_000_000_000_000;
+
+describe("quota-aware selection", () => {
+  test("spends high remaining quota near reset before distant quota", () => {
+    const decision = selectAccount({
+      candidates: [
+        candidate("near", NOW, { weeklyRemaining: 80, resetHours: 1 }),
+        candidate("distant", NOW, { weeklyRemaining: 20, resetHours: 100 }),
+      ],
+      config: defaultConfig,
+      now: NOW,
+    });
+    expect(decision.accountId).toBe("near");
+  });
+
+  test("drains the least weekly remaining account when urgency is tied", () => {
+    const decision = selectAccount({
+      candidates: [
+        candidate("thirty", NOW, { weeklyRemaining: 30, resetHours: 30 }),
+        candidate("ten", NOW, { weeklyRemaining: 10, resetHours: 10 }),
+      ],
+      config: defaultConfig,
+      now: NOW,
+    });
+    expect(decision.accountId).toBe("ten");
+  });
+
+  test("short-window and weekly headroom veto an urgency winner", () => {
+    const decision = selectAccount({
+      candidates: [
+        candidate("short-low", NOW, {
+          shortRemaining: 9,
+          weeklyRemaining: 90,
+          resetHours: 1,
+        }),
+        candidate("weekly-low", NOW, {
+          weeklyRemaining: 2,
+          resetHours: 1,
+        }),
+        candidate("safe", NOW, { weeklyRemaining: 20, resetHours: 20 }),
+      ],
+      config: defaultConfig,
+      now: NOW,
+    });
+    expect(decision.accountId).toBe("safe");
+    expect(decision.candidates.find((value) => value.accountId === "short-low")).toEqual(
+      expect.objectContaining({ rejectionCode: "short_headroom" }),
+    );
+  });
+
+  test("uses fresh candidates before penalized stale fallback data", () => {
+    const decision = selectAccount({
+      candidates: [
+        candidate("stale", NOW, {
+          weeklyRemaining: 90,
+          resetHours: 1,
+          stale: true,
+          ageMs: 600_000,
+        }),
+        candidate("fresh", NOW, { weeklyRemaining: 10, resetHours: 100 }),
+      ],
+      config: defaultConfig,
+      now: NOW,
+    });
+    expect(decision.accountId).toBe("fresh");
+  });
+
+  test("excludes missing, over-age, and untouched quota clocks", () => {
+    const decision = selectAccount({
+      candidates: [
+        candidate("missing-weekly", NOW, { weeklyWindow: false }),
+        candidate("too-old", NOW, { stale: true, ageMs: 86_400_001 }),
+        candidate("untouched", NOW, {
+          untouched: true,
+          weeklyRemaining: 100,
+          resetHours: 1,
+        }),
+      ],
+      config: defaultConfig,
+      now: NOW,
+    });
+    expect(decision.accountId).toBeUndefined();
+    expect(decision.reason).toBe("no_eligible_accounts");
+  });
+
+  test("honors a healthy manual account and reports an unhealthy override", () => {
+    const forced = candidate("forced", NOW, {
+      shortRemaining: 1,
+      weeklyRemaining: 1,
+      untouched: true,
+    });
+    expect(
+      selectAccount({
+        candidates: [forced, candidate("auto", NOW)],
+        config: { ...defaultConfig, manualAccountId: "forced" },
+        now: NOW,
+      }).accountId,
+    ).toBe("forced");
+
+    const unhealthy = selectAccount({
+      candidates: [{ ...forced, needsReauth: true }, candidate("auto", NOW)],
+      config: { ...defaultConfig, manualAccountId: "forced" },
+      now: NOW,
+    });
+    expect(unhealthy.accountId).toBeUndefined();
+    expect(unhealthy.reason).toBe("manual_account_unavailable");
+  });
+
+  test("retains the current account inside the ten-percent hysteresis band", () => {
+    const decision = selectAccount({
+      candidates: [
+        candidate("current", NOW, { weeklyRemaining: 19, resetHours: 20 }),
+        candidate("winner", NOW, { weeklyRemaining: 20, resetHours: 20 }),
+      ],
+      config: defaultConfig,
+      currentAccountId: "current",
+      now: NOW,
+    });
+    expect(decision.accountId).toBe("current");
+  });
+
+  test("uses short headroom then stable id for complete ties", () => {
+    const decision = selectAccount({
+      candidates: [
+        candidate("b", NOW, { shortRemaining: 70 }),
+        candidate("a", NOW, { shortRemaining: 80 }),
+      ],
+      config: defaultConfig,
+      now: NOW,
+    });
+    expect(decision.accountId).toBe("a");
+
+    const lexical = selectAccount({
+      candidates: [candidate("b", NOW), candidate("a", NOW)],
+      config: defaultConfig,
+      now: NOW,
+    });
+    expect(lexical.accountId).toBe("a");
+  });
+
+  test("computes weekly remaining per hour", () => {
+    expect(
+      weeklyUrgency(
+        usage({
+          accountId: "a",
+          now: NOW,
+          weeklyRemaining: 50,
+          resetHours: 2,
+        }),
+        NOW,
+      ),
+    ).toBeCloseTo(0.25);
+  });
+});
