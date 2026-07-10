@@ -2,6 +2,9 @@
   "name": "@robinbraemer/pi-quota-router",
   "version": "0.1.0",
   "description": "Quota-aware multi-account routing for normal Pi",
+  "keywords": [
+    "pi-package"
+  ],
   "type": "module",
   "main": "./src/index.ts",
   "packageManager": "bun@1.3.7",
@@ -21,9 +24,9 @@
     "pack:check": "bun pm pack --dry-run --ignore-scripts"
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": "^0.80.6",
-    "@earendil-works/pi-coding-agent": "^0.80.6",
-    "@earendil-works/pi-tui": "^0.80.6"
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
   },
   "dependencies": {
     "proper-lockfile": "4.1.2",

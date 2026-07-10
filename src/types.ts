@@ -1,7 +1,7 @@
 export interface RouterConfig {
   version: 1;
   enabled: boolean;
-  manualAccountId?: string;
+  manualAccountId?: string | undefined;
   usageFreshnessMs: number;
   maxRotationAttempts: number;
   maxRecoveryWaitMs: number;
@@ -50,7 +50,7 @@ export interface AccountBlock {
   accountId: string;
   kind: "quota" | "auth" | "transient";
   blockedAt: number;
-  retryAt?: number;
+  retryAt?: number | undefined;
   estimated: boolean;
 }
 
