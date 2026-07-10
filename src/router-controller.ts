@@ -430,7 +430,7 @@ export async function createRouterController(
         ...(label ? { label } : {}),
         vault,
         ...(options.login ? { login: options.login } : {}),
-        onAccountAdded: async ({ id }) => {
+        onAccountAdded: async ({ id, label: addedLabel }) => {
           await stateStore.update((state) => ({
             ...state,
             blocks: state.blocks.filter((block) => block.accountId !== id || block.kind !== "auth"),
@@ -498,6 +498,9 @@ export async function createRouterController(
         }
       }
       return results.join("\n");
+    },
+    async confirmPriming() {
+      return "Synthetic priming authorized for this confirmed command.";
     },
     async policy() {
       cachedConfig = await configStore.read();

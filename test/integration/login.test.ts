@@ -4,8 +4,7 @@ import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { performCodexLogin } from "../../src/commands/login.ts";
 import { makeCredentials } from "../fixtures/oauth.ts";
 
-const AUTHORIZATION_URL =
-  "https://auth.openai.com/oauth/authorize?response_type=code&client_id=codex-test&state=oauth-state";
+const AUTHORIZATION_URL = `https://auth.openai.com/oauth/authorize?response_type=code&client_id=app_EMoamEEZ73f0CkXaXp7hrann&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback&code_challenge=${"a".repeat(43)}&code_challenge_method=S256&state=oauth-state`;
 const OPEN_ACTION = "Open authorization URL in default browser";
 const COPY_ACTION = "Copy authorization URL";
 const MANUAL_ACTION = "Show authorization URL for manual use";
@@ -124,6 +123,8 @@ describe("Codex command login", () => {
       "https://user:password@auth.openai.com/oauth/authorize?response_type=code&client_id=codex-test&state=oauth-state",
       "https://auth.openai.com/oauth/authorize?response_type=code&client_id=codex-test",
       "https://auth.openai.com/oauth/authorize?response_type=code&client_id=codex-test&state=oauth-state#injected",
+      "https://auth.openai.com/oauth/authorize?response_type=code&client_id=app_EMoamEEZ73f0CkXaXp7hrann",
+      `${AUTHORIZATION_URL}#injected`,
     ]) {
       const harness = createLoginHarness(OPEN_ACTION, url);
       await expect(performCodexLogin(harness.options)).rejects.toThrow(
@@ -131,6 +132,44 @@ describe("Codex command login", () => {
       );
       expect(harness.added).toEqual([]);
     }
+  });
+
+  test("rejects foreign clients, redirects, and missing PKCE", async () => {
+    for (const url of [
+      AUTHORIZATION_URL.replace("app_EMoamEEZ73f0CkXaXp7hrann", "foreign-client"),
+      AUTHORIZATION_URL.replace(
+        "http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback",
+        "https%3A%2F%2Fattacker.example%2Fcallback",
+      ),
+      AUTHORIZATION_URL.replace(`&code_challenge=${"a".repeat(43)}`, ""),
+      AUTHORIZATION_URL.replace("code_challenge_method=S256", "code_challenge_method=plain"),
+      `${AUTHORIZATION_URL}&client_id=foreign-client`,
+    ]) {
+      const harness = createLoginHarness(OPEN_ACTION, url);
+      await expect(performCodexLogin(harness.options)).rejects.toThrow(
+        "Unexpected Codex authorization URL",
+      );
+      expect(harness.added).toEqual([]);
+    }
+  });
+
+  test("defers invalid authorization URL failures until callback cleanup is active", async () => {
+    const harness = createLoginHarness(OPEN_ACTION);
+    let onAuthReturned = false;
+
+    await expect(
+      performCodexLogin({
+        ...harness.options,
+        login: async (callbacks) => {
+          callbacks.onAuth({ url: "https://attacker.example/oauth/authorize" });
+          onAuthReturned = true;
+          await callbacks.onManualCodeInput?.();
+          throw new Error("unreachable");
+        },
+      }),
+    ).rejects.toThrow("Unexpected Codex authorization URL");
+
+    expect(onAuthReturned).toBe(true);
   });
 
   test("does not expose upstream OAuth token responses", async () => {
@@ -204,7 +243,7 @@ function createLoginHarness(
         callbacks: Parameters<NonNullable<Parameters<typeof performCodexLogin>[0]["login"]>>[0],
       ) => {
         callbacks.onAuth({ url, instructions: "Provider-controlled instructions" });
-        expect(await callbacks.onPrompt({ message: "Code?" })).toBe("manual-code");
+        expect(await callbacks.onManualCodeInput?.()).toBe("manual-code");
         return credentials;
       },
     },

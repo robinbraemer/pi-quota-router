@@ -30,6 +30,7 @@ export async function performCodexLogin(options: {
   onAccountAdded?: (account: { id: string; label: string }) => Promise<void> | void;
 }): Promise<CodexLoginResult> {
   let authorizationAction: Promise<void> | undefined;
+  let authorizationError: SafeCodexLoginError | undefined;
   const manualPromptAbort = new AbortController();
   const fallbackActions = defaultAuthorizationActions;
   const actions =
@@ -49,7 +50,8 @@ export async function performCodexLogin(options: {
         try {
           validatedUrl = validateAuthorizationUrl(url);
         } catch {
-          throw new SafeCodexLoginError("Unexpected Codex authorization URL");
+          authorizationError = new SafeCodexLoginError("Unexpected Codex authorization URL");
+          return;
         }
         authorizationAction = presentAuthorizationActions(
           options.ctx,
@@ -61,6 +63,9 @@ export async function performCodexLogin(options: {
       onPrompt: ({ message, placeholder }) =>
         promptForAuthorizationCode(options.ctx, message, placeholder),
       onManualCodeInput: async () => {
+        if (authorizationError) {
+          throw authorizationError;
+        }
         await authorizationAction;
         return promptForAuthorizationCode(
           options.ctx,

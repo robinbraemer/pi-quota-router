@@ -10,6 +10,7 @@ export interface QuotaRouterOperations {
   use(selector: string): Promise<string>;
   refresh(selector?: string): Promise<string>;
   prime(selector?: string, modelId?: string): Promise<string>;
+  confirmPriming(): Promise<string>;
   policy(): Promise<string>;
   reset(scope: string): Promise<string>;
   verify(): Promise<string>;
@@ -36,7 +37,6 @@ export function registerQuotaRouterCommands(
             result = await operations.status();
             break;
           case "accounts":
-          case "list":
             result = await operations.accounts();
             break;
           case "list":
@@ -67,6 +67,7 @@ export function registerQuotaRouterCommands(
               ctx.ui.notify("Priming cancelled; no quota was spent.", "warning");
               return;
             }
+            await operations.confirmPriming();
             result = await operations.prime(parsed.args[0], ctx.model?.id);
             break;
           }

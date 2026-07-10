@@ -190,6 +190,8 @@ describe("quota router end-to-end guarantees", () => {
     let primedAccountId: string | undefined;
     let primerCalls = 0;
     let normalCalls = 0;
+    let primerModelId: string | undefined;
+    const selectedModel = Object.values(OPENAI_CODEX_MODELS)[1] as Model<"openai-codex-responses">;
     const controller = await createRouterController({
       paths: resolveRouterPaths(home.agentDirectory),
       clock: () => NOW,
@@ -201,13 +203,14 @@ describe("quota router end-to-end guarantees", () => {
           ...(primedAccountId === accountId ? { weeklyResetAt: NOW + 7 * 24 * 3_600_000 } : {}),
         }),
       ),
-      baseStream: (_model, _context, options) => {
+      baseStream: (streamModel, _context, options) => {
         if (options?.maxTokens === 1) {
           primerCalls += 1;
           primedAccountId =
             options.apiKey === credentials[0]?.access
               ? "untouched-account-a"
               : "untouched-account-b";
+          primerModelId = streamModel.id;
         } else {
           normalCalls += 1;
         }
@@ -217,7 +220,7 @@ describe("quota router end-to-end guarantees", () => {
     await controller.vault.addFromOAuth("untouched-a", credentials[0]);
     await controller.vault.addFromOAuth("untouched-b", credentials[1]);
 
-    expect(await controller.operations.prime()).toContain("confirmed");
+    expect(await controller.operations.prime(undefined, selectedModel.id)).toContain("confirmed");
     expect(primerCalls).toBe(1);
     expect(JSON.parse(await controller.operations.policy()).priming).toMatchObject({
       enabled: false,
@@ -226,6 +229,7 @@ describe("quota router end-to-end guarantees", () => {
     controller.schedulePriming();
     await Bun.sleep(10);
     expect(primerCalls).toBe(1);
+    expect(primerModelId).toBe(selectedModel.id);
     expect((await collect(controller.routedStream(model, context))).at(-1)?.type).toBe("done");
     expect(normalCalls).toBe(1);
     await controller.shutdown();

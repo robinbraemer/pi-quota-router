@@ -87,6 +87,38 @@ describe("/quota-router commands", () => {
     expect(notifications).toHaveLength(13);
   });
 
+  test("passes the current model to explicit priming", async () => {
+    let handler: ((args: string, ctx: ExtensionCommandContext) => Promise<void>) | undefined;
+    const calls: unknown[][] = [];
+    const pi = {
+      registerCommand: (_name: string, options: { handler: typeof handler }) => {
+        handler = options.handler;
+      },
+    } as unknown as ExtensionAPI;
+    const operations = {
+      prime: async (...args: unknown[]) => {
+        calls.push(args);
+        return "primed";
+      },
+      confirmPriming: async () => "confirmed",
+    } as unknown as QuotaRouterOperations;
+    const ctx = {
+      model: { id: "gpt-5.2-codex" },
+      ui: {
+        notify: () => undefined,
+        confirm: async () => true,
+      },
+    } as unknown as ExtensionCommandContext;
+    registerQuotaRouterCommands(pi, operations);
+    if (!handler) {
+      throw new Error("command was not registered");
+    }
+
+    await handler("prime all", ctx);
+
+    expect(calls).toEqual([["all", "gpt-5.2-codex"]]);
+  });
+
   test("rerenders footer status before a successful login command resolves", async () => {
     let handler: ((args: string, ctx: ExtensionCommandContext) => Promise<void>) | undefined;
     const sequence: string[] = [];

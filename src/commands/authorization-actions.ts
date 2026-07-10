@@ -7,6 +7,8 @@ export interface AuthorizationActions {
 
 const AUTHORIZATION_ORIGIN = "https://auth.openai.com";
 const AUTHORIZATION_PATH = "/oauth/authorize";
+const CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
+const CODEX_REDIRECT_URI = "http://localhost:1455/auth/callback";
 
 export function validateAuthorizationUrl(value: string): string {
   let url: URL;
@@ -21,13 +23,30 @@ export function validateAuthorizationUrl(value: string): string {
     url.username !== "" ||
     url.password !== "" ||
     url.hash !== "" ||
-    url.searchParams.get("response_type") !== "code" ||
-    !url.searchParams.get("client_id") ||
-    !url.searchParams.get("state")
+    !hasSingleSearchParam(url, "response_type", "code") ||
+    !hasSingleSearchParam(url, "client_id", CODEX_CLIENT_ID) ||
+    !hasSingleSearchParam(url, "redirect_uri", CODEX_REDIRECT_URI) ||
+    !hasSingleSearchParam(url, "code_challenge_method", "S256") ||
+    !isPkceChallenge(url.searchParams.getAll("code_challenge")) ||
+    !hasSingleNonemptySearchParam(url, "state")
   ) {
     throw new Error("Unexpected Codex authorization URL");
   }
   return url.toString();
+}
+
+function hasSingleSearchParam(url: URL, name: string, expected: string): boolean {
+  const values = url.searchParams.getAll(name);
+  return values.length === 1 && values[0] === expected;
+}
+
+function hasSingleNonemptySearchParam(url: URL, name: string): boolean {
+  const values = url.searchParams.getAll(name);
+  return values.length === 1 && values[0] !== "";
+}
+
+function isPkceChallenge(values: string[]): boolean {
+  return values.length === 1 && /^[A-Za-z0-9_-]{43,128}$/.test(values[0] ?? "");
 }
 
 export const defaultAuthorizationActions: AuthorizationActions = {

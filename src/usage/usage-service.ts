@@ -1,5 +1,6 @@
 import { AccountNeedsReauthError } from "../accounts/account-vault.ts";
 import type { UsageSnapshot } from "../types.ts";
+import { raceWithSignal } from "../util/abort.ts";
 import { type Clock, systemClock } from "../util/clock.ts";
 
 const DEFAULT_FRESHNESS_MS = 300_000;
@@ -63,7 +64,12 @@ export function createUsageService(options: UsageServiceOptions): UsageService {
 
       const pending = inflight.get(accountId);
       if (pending) {
-        return awaitWithSignal(pending, getOptions.signal);
+        if (!getOptions.force) {
+          return raceWithSignal(pending, getOptions.signal);
+        }
+        await raceWithSignal(pending, getOptions.signal).catch(() => {
+          getOptions.signal?.throwIfAborted();
+        });
       }
 
       getOptions.signal?.throwIfAborted();
@@ -93,7 +99,7 @@ export function createUsageService(options: UsageServiceOptions): UsageService {
         }
       });
       inflight.set(accountId, request);
-      return awaitWithSignal(request, getOptions.signal);
+      return raceWithSignal(request, getOptions.signal);
     },
 
     peek(accountId) {
@@ -104,27 +110,6 @@ export function createUsageService(options: UsageServiceOptions): UsageService {
       cache.delete(accountId);
     },
   };
-}
-
-function awaitWithSignal<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
-  if (!signal) {
-    return promise;
-  }
-  signal.throwIfAborted();
-  return new Promise<T>((resolve, reject) => {
-    const onAbort = () => reject(signal.reason);
-    signal.addEventListener("abort", onAbort, { once: true });
-    promise.then(
-      (value) => {
-        signal.removeEventListener("abort", onAbort);
-        resolve(value);
-      },
-      (error) => {
-        signal.removeEventListener("abort", onAbort);
-        reject(error);
-      },
-    );
-  });
 }
 
 function createConcurrencyGate(maximum: number) {
