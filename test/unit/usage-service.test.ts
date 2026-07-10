@@ -124,6 +124,35 @@ describe("UsageService", () => {
     expect(calls).toBe(2);
   });
 
+  test("coalesces forced fetches queued behind the same in-flight request", async () => {
+    let releaseFirst: (() => void) | undefined;
+    let calls = 0;
+    const service = createUsageService({
+      clock: () => 1_000_000,
+      jitterMs: () => 0,
+      fetchUsage: async (accountId) => {
+        calls += 1;
+        if (calls === 1) {
+          await new Promise<void>((resolve) => {
+            releaseFirst = resolve;
+          });
+        }
+        return snapshot(accountId, 1_000_000 + calls);
+      },
+    });
+
+    const first = service.get("a");
+    await Bun.sleep(0);
+    const forced = [service.get("a", { force: true }), service.get("a", { force: true })];
+    releaseFirst?.();
+
+    expect((await first).observedAt).toBe(1_000_001);
+    expect((await Promise.all(forced)).map((value) => value.observedAt)).toEqual([
+      1_000_002, 1_000_002,
+    ]);
+    expect(calls).toBe(2);
+  });
+
   test("allows at most two upstream usage requests concurrently", async () => {
     let active = 0;
     let maximum = 0;

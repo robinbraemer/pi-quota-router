@@ -27,7 +27,7 @@ interface RankedCandidate {
 
 export function weeklyUrgency(snapshot: UsageSnapshot, now: number): number {
   const weekly = snapshot.weeklyWindow;
-  if (!weekly?.resetsAt) {
+  if (!weekly?.resetsAt || weekly.resetsAt <= now) {
     return 0;
   }
   const remaining = Math.max(0, 1 - weekly.usedPercent / 100);
@@ -146,6 +146,9 @@ function evaluate(
   const weekly = candidate.usage.weeklyWindow;
   if (!weekly?.resetsAt) {
     return { explanation: reject(candidate, freshness, "weekly_window_unknown") };
+  }
+  if (weekly.resetsAt <= input.now) {
+    return { explanation: reject(candidate, freshness, "weekly_reset_elapsed") };
   }
 
   const penalty = freshness === "stale" ? STALE_PENALTY_PERCENT : 0;

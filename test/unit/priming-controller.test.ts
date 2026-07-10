@@ -214,6 +214,29 @@ describe("PrimingController", () => {
     expect(requests[0]?.modelId).toBe("gpt-invocation");
   });
 
+  test.each([
+    ["permanent", undefined],
+    ["live", NOW + 60_000],
+  ] as const)("does not reserve an account with a %s block", async (_kind, retryAt) => {
+    const { controller, store, requests } = await setup({ authorized: true });
+    await store.update((state) => ({
+      ...state,
+      blocks: [
+        {
+          accountId: "a",
+          kind: "transient",
+          blockedAt: NOW,
+          ...(retryAt === undefined ? {} : { retryAt }),
+          estimated: false,
+        },
+      ],
+    }));
+
+    expect(await controller.primeAccount("a")).toEqual({ status: "reserved" });
+    expect(requests).toHaveLength(0);
+    expect((await store.read()).reservations).toHaveLength(0);
+  });
+
   test("applies the sweep limit to primer attempts instead of account positions", async () => {
     const { controller, store, requests } = await setup({
       authorized: true,

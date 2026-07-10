@@ -88,6 +88,22 @@ describe("quota-aware selection", () => {
     expect(decision.reason).toBe("no_eligible_accounts");
   });
 
+  test("excludes a snapshot after its weekly reset clock elapses", () => {
+    const decision = selectAccount({
+      candidates: [
+        candidate("expired", NOW, { weeklyRemaining: 90, resetHours: -1 }),
+        candidate("valid", NOW, { weeklyRemaining: 20, resetHours: 20 }),
+      ],
+      config: defaultConfig,
+      now: NOW,
+    });
+
+    expect(decision.accountId).toBe("valid");
+    expect(decision.candidates.find((value) => value.accountId === "expired")).toEqual(
+      expect.objectContaining({ rejectionCode: "weekly_reset_elapsed" }),
+    );
+  });
+
   test("honors a healthy manual account and reports an unhealthy override", () => {
     const forced = candidate("forced", NOW, {
       shortRemaining: 1,
@@ -155,5 +171,19 @@ describe("quota-aware selection", () => {
         NOW,
       ),
     ).toBeCloseTo(0.25);
+  });
+
+  test("does not assign urgency to an elapsed weekly reset", () => {
+    expect(
+      weeklyUrgency(
+        usage({
+          accountId: "a",
+          now: NOW,
+          weeklyRemaining: 50,
+          resetHours: -1,
+        }),
+        NOW,
+      ),
+    ).toBe(0);
   });
 });

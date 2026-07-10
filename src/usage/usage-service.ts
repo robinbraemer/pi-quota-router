@@ -38,7 +38,34 @@ export function createUsageService(options: UsageServiceOptions): UsageService {
   const jitterMs = options.jitterMs ?? (() => 0);
   const cache = new Map<string, UsageSnapshot>();
   const inflight = new Map<string, Promise<UsageSnapshot>>();
+  const forcedFollowups = new Map<string, Promise<UsageSnapshot>>();
   const gate = createConcurrencyGate(options.maxConcurrent ?? DEFAULT_MAX_CONCURRENT);
+
+  const startRequest = (accountId: string, signal?: AbortSignal): Promise<UsageSnapshot> => {
+    const request = (async () => {
+      const release = await gate.acquire(signal);
+      try {
+        const fresh = await options.fetchUsage(accountId, signal);
+        const normalized = fresh.stale ? { ...fresh, stale: false } : fresh;
+        cache.set(accountId, normalized);
+        return normalized;
+      } catch (error) {
+        const lastGood = cache.get(accountId);
+        if (lastGood && clock() - lastGood.observedAt <= maxStaleMs) {
+          return { ...lastGood, stale: true };
+        }
+        throw error;
+      } finally {
+        release();
+      }
+    })().finally(() => {
+      if (inflight.get(accountId) === request) {
+        inflight.delete(accountId);
+      }
+    });
+    inflight.set(accountId, request);
+    return request;
+  };
 
   return {
     hydrate(snapshot) {
@@ -67,39 +94,22 @@ export function createUsageService(options: UsageServiceOptions): UsageService {
         if (!getOptions.force) {
           return raceWithSignal(pending, getOptions.signal);
         }
-        await raceWithSignal(pending, getOptions.signal).catch(() => {
-          getOptions.signal?.throwIfAborted();
-        });
+        let followup = forcedFollowups.get(accountId);
+        if (!followup) {
+          followup = pending
+            .catch(() => undefined)
+            .then(() => startRequest(accountId))
+            .finally(() => {
+              if (forcedFollowups.get(accountId) === followup) {
+                forcedFollowups.delete(accountId);
+              }
+            });
+          forcedFollowups.set(accountId, followup);
+        }
+        return raceWithSignal(followup, getOptions.signal);
       }
 
-      getOptions.signal?.throwIfAborted();
-
-      const request = (async () => {
-        const release = await gate.acquire();
-        try {
-          const fresh = await options.fetchUsage(accountId);
-          const normalized = fresh.stale ? { ...fresh, stale: false } : fresh;
-          cache.set(accountId, normalized);
-          return normalized;
-        } catch (error) {
-          if (error instanceof AccountNeedsReauthError) {
-            throw error;
-          }
-          const lastGood = cache.get(accountId);
-          if (lastGood && clock() - lastGood.observedAt <= maxStaleMs) {
-            return { ...lastGood, stale: true };
-          }
-          throw error;
-        } finally {
-          release();
-        }
-      })().finally(() => {
-        if (inflight.get(accountId) === request) {
-          inflight.delete(accountId);
-        }
-      });
-      inflight.set(accountId, request);
-      return raceWithSignal(request, getOptions.signal);
+      return startRequest(accountId, getOptions.signal);
     },
 
     peek(accountId) {

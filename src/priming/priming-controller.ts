@@ -256,7 +256,11 @@ async function reservePrimerAccount(
   let acquired: Reservation | undefined;
   await options.stateStore.update((state) => {
     const reservations = state.reservations.filter((value) => value.expiresAt > now);
-    if (reservations.some((value) => value.accountId === accountId)) {
+    const blocked = state.blocks.some(
+      (value) =>
+        value.accountId === accountId && (value.retryAt === undefined || value.retryAt > now),
+    );
+    if (blocked || reservations.some((value) => value.accountId === accountId)) {
       return { ...state, reservations };
     }
     acquired = {
