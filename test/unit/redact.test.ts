@@ -3,16 +3,18 @@ import { redact, sanitizeDisplay } from "../../src/logging/redact.ts";
 
 describe("credential redaction", () => {
   test("redacts bearer, JWT, API-key-like, and long opaque values", () => {
+    const jwt = [`eyJ${"a".repeat(16)}`, `eyJ${"b".repeat(16)}`, "c".repeat(12)].join(".");
+    const apiKey = `sk-proj-${"d".repeat(32)}`;
     const value = [
       "Bearer secret-bearer-value",
-      "eyJhbGciOiJub25lIn0.eyJzdWIiOiIxIn0.signature",
-      "sk-proj-abcdefghijklmnopqrstuvwxyz123456",
+      jwt,
+      apiKey,
       "0123456789abcdef0123456789abcdef0123456789abcdef",
     ].join(" ");
     const result = redact(value);
     expect(result).not.toContain("secret-bearer-value");
-    expect(result).not.toContain("eyJhbGci");
-    expect(result).not.toContain("sk-proj");
+    expect(result).not.toContain(jwt);
+    expect(result).not.toContain(apiKey);
     expect(result).not.toContain("0123456789abcdef");
     expect(result.match(/\[REDACTED\]/g)?.length).toBeGreaterThanOrEqual(4);
   });

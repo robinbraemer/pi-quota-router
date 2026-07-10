@@ -21,6 +21,8 @@
     "lint": "biome check .",
     "typecheck": "tsgo --noEmit",
     "check": "bun run lint && bun run typecheck && bun test",
+    "audit": "bun audit --prod --audit-level=high",
+    "check:secrets": "bun run scripts/check-secrets.ts",
     "smoke:install": "bun run scripts/smoke-install.ts",
     "pack:check": "bun pm pack --dry-run --ignore-scripts"
   },
