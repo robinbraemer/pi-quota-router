@@ -30,7 +30,7 @@ Start with:
 | `busy` from prime | Foreground agent work is active. Wait until Pi settles. |
 | `Codex model ... is unavailable for priming` | Select a registered `openai-codex` model and invoke prime again. The rejected command made no usage/provider request and did not start the retry cooldown. |
 | `inconclusive` from prime | No weekly reset appeared after the minimal request. Wait one hour; do not assume the rolling-window behavior. |
-| `failed` from prime | The minimal provider request failed. Check connectivity/authentication, then retry after one hour. |
+| `failed` from prime | The minimal provider request failed, but the router still force-refreshed usage. If that refresh exposed a weekly reset, the account was recorded as confirmed while the provider failure remained visible; otherwise check connectivity/authentication and retry after one hour. |
 
 `/quota-router prime all` is still one-shot: it sends at most one minimal request and stops after the forced quota refresh. It never enables later background priming.
 

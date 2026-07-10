@@ -171,7 +171,7 @@ The provider override is the only component coupled to Pi's streaming types. Sel
 - Refreshes tokens five minutes before expiry.
 - Uses one in-process promise and one cross-process lock per account refresh.
 - Reloads after acquiring the lock so a peer's completed refresh is reused.
-- Preserves credentials from a successful login that races an older refresh result or failure.
+- Preserves credentials from a successful login that races an older refresh, usage, or routed-auth result by invalidating only the rejected credential.
 - Never reads or writes Pi's `auth.json` during normal operation.
 
 ### `src/storage/atomic-json-store.ts`
@@ -195,7 +195,7 @@ The provider override is the only component coupled to Pi's streaming types. Sel
 - Caches snapshots for five minutes.
 - Coalesces concurrent refreshes per account; cancelling one caller does not cancel the shared fetch for other callers.
 - Keeps a last-good snapshot for 24 hours, clearly marked stale.
-- Forces a fresh fetch after priming and quota errors.
+- Forces a fresh fetch after every non-aborted primer provider attempt and after quota errors.
 - Limits concurrent upstream usage requests to two.
 
 ### `src/routing/selection-policy.ts`
@@ -218,9 +218,10 @@ The provider override is the only component coupled to Pi's streaming types. Sel
 - Finds accounts confirmed as untouched with no weekly reset clock.
 - Accepts either persistent policy authorization for an explicit sweep or ephemeral one-shot authorization for a confirmed command.
 - Waits until Pi is idle and no foreground routed request is active.
-- Reserves one account, sends a minimal no-tool Codex request, then force-refreshes usage.
+- Reserves one account, sends a minimal no-tool Codex request, then force-refreshes usage even if the provider reports an error.
 - Marks success only when a weekly reset timestamp is observed.
-- Applies a one-hour retry cooldown after an inconclusive or failed primer.
+- Preserves a provider-error result as `failed` even when the usage observation confirms the account.
+- Applies a one-hour retry cooldown after an inconclusive or failed primer only when no weekly reset was observed.
 - Runs sequentially and is abortable on shutdown.
 
 ### `src/stream/routed-stream.ts`
@@ -343,7 +344,7 @@ For each account:
 - Primer state.
 - Reservation state.
 - Manual override.
-- Current account for hysteresis.
+- Last successfully completed routed account for hysteresis, separate from the account shown after login or a failed route.
 
 ### Eligibility
 
@@ -373,13 +374,13 @@ Higher urgency wins because it represents more quota that must be spent per hour
 
 ### Tie-breakers
 
-Candidates within 10% of the highest urgency are materially tied. If the current account is in that band and passes all eligibility checks, retain it first to preserve prompt-cache affinity. Otherwise resolve the band in this order:
+Candidates within 10% of the highest urgency are materially tied. If the last successfully completed routed account is in that band and passes all eligibility checks, retain it first to preserve prompt-cache affinity. A login display update or failed route does not change this history. Otherwise resolve the band in this order:
 
 1. Least weekly remaining quota that still passes the 3% headroom floor.
 2. Most 5-hour remaining quota.
 3. Stable account id lexical order for deterministic behavior.
 
-This avoids account churn for negligible score improvements while keeping selection deterministic when the current account is not retained.
+This avoids account churn for negligible score improvements while keeping selection deterministic when the last successful account is not retained.
 
 ### Manual override
 
@@ -413,10 +414,10 @@ The synthetic primer:
 - Runs only while Pi is idle.
 - Sends at most one provider request per confirmed command, including `prime all`.
 - Holds a reservation for the full request.
-- Force-refreshes usage after completion.
+- Force-refreshes usage after every non-aborted provider attempt, including provider errors.
 - Succeeds only after observing a weekly reset timestamp.
 
-If the reset timestamp remains absent, the account is not marked primed. It receives a one-hour primer retry cooldown and is not used for foreground work unless manually selected.
+If the reset timestamp remains absent, the account is not marked primed. It receives a one-hour primer retry cooldown and is not used for foreground work unless manually selected. If the provider reported an error but the forced refresh observes the timestamp, the account is confirmed while the command still reports `failed`.
 
 The command force-refreshes and records the observed quota state, then stops. Agent settlement does not schedule background primer work. Persistent automatic priming remains disabled unless a separate explicit action and confirmation contract is added later.
 
@@ -437,9 +438,9 @@ An explicit forced refresh reconciles an estimated cooldown: available quota cle
 
 - Refresh expired tokens before the request.
 - Coalesce concurrent refreshes.
-- Preserve newer credentials when a successful login races an older refresh result or definitive refresh failure.
+- Preserve newer credentials when a successful login races an older refresh, usage, or routed-auth failure; permanent invalidation applies only if the rejected access token is still current.
 - On the first generic `401`, force-refresh once and retry the same account before rotating.
-- Definitive `invalid_grant`, revoked-token, malformed access-token, or identity-mismatch responses mark the account `needsReauth` immediately.
+- Definitive `invalid_grant`, revoked-token, malformed access-token, or identity-mismatch responses mark the account `needsReauth` when the rejected credential is still current.
 - A transient refresh network failure causes a one-minute cooldown, not permanent invalidation.
 - No credential value appears in logs, notifications, state, or thrown messages.
 
@@ -529,7 +530,7 @@ Each atomic selection persists a credential-free `lastSelection` explanation in 
 - Manual selection wins while healthy.
 - Stale data is penalized and fresh data wins.
 - Untouched/no-clock accounts are excluded until primed or manually selected.
-- Hysteresis retains the current account within the 10% band.
+- Hysteresis retains the last successfully completed routed account within the 10% band and ignores login display changes and failed routes.
 - Deterministic account id resolves complete ties.
 
 ### Priming tests
@@ -541,6 +542,7 @@ Each atomic selection persists a credential-free `lastSelection` explanation in 
 - Primer does not block a foreground request.
 - Successful confirmation requires a newly observed weekly reset.
 - Inconclusive primer applies a one-hour retry cooldown.
+- Provider failure still force-refreshes usage, records an observed reset, and preserves `failed` status.
 - Shutdown aborts primer work and releases leases.
 
 ### Stream tests
@@ -563,6 +565,7 @@ Each atomic selection persists a credential-free `lastSelection` explanation in 
 - Two controllers never reserve the same account simultaneously.
 - Duplicate `accountId` login updates rather than duplicates.
 - Successful reauthentication clears the account's permanent auth block.
+- Stale auth failures cannot invalidate credentials installed by a concurrent re-login.
 - Forced fresh non-exhausted usage clears an estimated cooldown.
 - Recovery waiting notices an account added by a peer.
 

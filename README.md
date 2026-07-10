@@ -41,7 +41,7 @@ Open normal Pi and add each Codex account with a distinct label:
 
 Each `login` opens Pi's normal OpenAI Codex OAuth flow. The router keeps its own multi-account vault and does not rewrite Pi's `auth.json`.
 
-When the authorization URL is ready, Pi shows an explicit action selector: open it in the default browser, copy it to the clipboard, or continue manually. The full URL always remains visible, including when a browser, clipboard, or interactive selector is unavailable, and the selector does not block OAuth completion. After credentials are saved, the footer rerenders immediately with the account label; it does not wait for a later agent turn. Reauthenticating an existing identity also clears its persisted authentication block.
+When the authorization URL is ready, Pi shows an explicit action selector: open it in the default browser, copy it to the clipboard, or continue manually. The full URL always remains visible, including when a browser, clipboard, or interactive selector is unavailable, and the selector does not block OAuth completion. After credentials are saved, the footer rerenders immediately with the account label; it does not wait for a later agent turn. This display update does not count as a successful route or affect automatic-routing hysteresis. Reauthenticating an existing identity also clears its persisted authentication block, and a later failure from the replaced credential cannot invalidate the new login.
 
 After at least one account has a weekly reset timestamp, ordinary Codex prompts route automatically. The model id, capabilities, and selected thinking level are passed through unchanged.
 
@@ -66,7 +66,7 @@ The highest urgency wins. For example:
 
 `work` is selected because much more useful quota will expire per hour. This intentionally drains expiring quota instead of equalizing percentages. Equalizing can preserve a neat balance while allowing a large near-reset allowance to disappear unused.
 
-Scores within 10% are treated as tied. The router retains the current eligible account within that band; otherwise it prefers the least weekly quota remaining, then the most 5-hour quota remaining, then the stable managed account id. See [the exact policy](docs/policy.md).
+Scores within 10% are treated as tied. The router retains the eligible account that last completed a routed request within that band; a login display update or failed route does not receive this preference. Otherwise it prefers the least weekly quota remaining, then the most 5-hour quota remaining, then the stable managed account id. See [the exact policy](docs/policy.md).
 
 ## Priming untouched accounts
 
@@ -83,7 +83,7 @@ Pi asks for two separate confirmations:
 1. Confirm that a minimal request may spend quota.
 2. Confirm that first-use rolling-window behavior is known.
 
-After both confirmations, the router sends exactly one `.` request with no history, no tools, the selected Codex model, the lowest reasoning level, and `maxTokens: 1`. It force-refreshes usage, observes the resulting quota state, marks the account primed only after seeing a weekly reset timestamp, and then stops. If the selected model is not a registered Codex model, the command stops before any usage or provider request and does not start the retry cooldown. A failed or inconclusive attempt waits one hour before another explicit retry.
+After both confirmations, the router sends exactly one `.` request with no history, no tools, the selected Codex model, the lowest reasoning level, and `maxTokens: 1`. After every non-aborted provider attempt, including one that reports an error, it force-refreshes usage and records any observed weekly reset timestamp. A provider error still reports `failed` even if that observation confirms the account. If no reset timestamp appears, a failed or inconclusive attempt waits one hour before another explicit retry. If the selected model is not a registered Codex model, the command stops before any usage or provider request and does not start the retry cooldown.
 
 The confirmations authorize only the current command. They do not change `config.json`, enable idle sweeps, or authorize future background priming. `/quota-router prime all` scans for the first eligible untouched account but still sends at most one provider request; run the command again and reconfirm to prime another account. Persistent automatic priming remains disabled unless a separate explicit action is introduced and confirmed. Once a clock is observed, the account enters normal urgency routing.
 

@@ -264,7 +264,7 @@ Cover:
 - refresh five minutes before expiry;
 - concurrent in-process refresh calls invoke OAuth once;
 - cross-process refresh lock reloads and reuses a peer's newer token;
-- invalid_grant marks needsReauth;
+- invalid_grant marks needsReauth only if the rejected credential is still current;
 - a network error applies a transient result without invalidation;
 - thrown messages never contain supplied tokens.
 
@@ -643,9 +643,10 @@ Prove:
 - primer sweep lease prevents two Pi processes from priming;
 - one confirmed command sends at most one provider request, even when scanning all accounts;
 - request contains no history or tools, exact prompt ".", lowest supported reasoning, and smallest output budget;
-- usage is force-refreshed after success;
+- usage is force-refreshed after every non-aborted provider attempt, including failure;
 - only an observed weekly reset marks confirmed;
-- inconclusive/failure applies one-hour cooldown;
+- a provider failure remains failed even when the usage observation confirms the account;
+- inconclusive/failure without an observed reset applies one-hour cooldown;
 - shutdown aborts work and releases both leases.
 
 **Step 2: Confirm the red state**

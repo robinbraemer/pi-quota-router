@@ -33,7 +33,7 @@ urgency = weeklyRemainingFraction / hoursToReset
 
 Higher urgency wins. It is the fraction of the weekly allowance that must be consumed per hour to avoid expiring unused. Thus an account with more remaining quota and fewer days left normally wins, instead of accounts being equalized by used percentage.
 
-The top 10% urgency band is hysteresis/tie territory:
+The top 10% urgency band is hysteresis/tie territory. Its current account is the account that last completed a routed request, not merely the account most recently shown after login or selected for a failed attempt:
 
 1. If the current account remains eligible and is within 10% of the top urgency, retain it.
 2. Otherwise consider all candidates within 10% of the top urgency.
@@ -63,7 +63,7 @@ Primer work renews both its singleton sweep lease and account lease. Foreground 
 - A request performs at most five account attempts.
 - An explicit provider retry time controls a quota block. Otherwise the latest observed reset across exhausted windows is used; without either, the estimate is one hour.
 - All-limited recovery waits are abortable, recheck state at most once per minute, and stop after six hours.
-- `invalid_grant` and revoked refresh tokens set `needsReauth` until a new login replaces the credentials.
+- `invalid_grant`, a usage credential rejected again after forced refresh, and revoked refresh tokens set `needsReauth` only while the rejected credential is still current. A concurrent successful re-login wins and remains healthy.
 - Generic network/timeout failures use a one-minute transient retry time.
 - A generic pre-output `401` forces one token refresh and retries the same account before rotation.
 - A forced usage refresh clears an estimated block when quota is available; otherwise the latest observed exhausted-window reset replaces the estimate.
@@ -77,6 +77,6 @@ When all known accounts are temporarily unavailable, recovery also rechecks the 
 
 `/quota-router prime` obtains both confirmations for the current invocation only. It does not set `priming.enabled` or `priming.confirmedFirstUseRollingWindow`, so it cannot authorize a later idle sweep or background request.
 
-An untouched candidate must have a fresh snapshot, 0% used in both windows, and no weekly reset timestamp. The primer sends one `.` request with no history/tools, the selected Codex model, minimum reasoning, and one output token. An unsupported selected model is rejected before usage, quota spend, or retry state changes. The primer succeeds only if a forced post-request usage refresh reveals a weekly reset timestamp. Otherwise the account waits one hour before another primer attempt.
+An untouched candidate must have a fresh snapshot, 0% used in both windows, and no weekly reset timestamp. The primer sends one `.` request with no history/tools, the selected Codex model, minimum reasoning, and one output token. An unsupported selected model is rejected before usage, quota spend, or retry state changes. Every non-aborted provider attempt is followed by a forced usage refresh, even when the provider reports an error. An observed weekly reset timestamp confirms the account, but a provider error still returns `failed`; without an observed timestamp, failed and inconclusive attempts wait one hour before another primer attempt.
 
 One command sends at most one provider request. With `all`, the router skips ineligible accounts until it finds the first candidate, makes that one attempt, refreshes/records the observed quota state, and stops. Agent-settled events never schedule priming. Persistent automatic priming remains disabled pending a separate explicit action and confirmation contract.

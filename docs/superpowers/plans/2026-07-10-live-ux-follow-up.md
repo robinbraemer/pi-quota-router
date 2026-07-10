@@ -94,7 +94,7 @@ Expected: status remains `none · login` and no command-time `setStatus` call oc
 
 - [ ] **Step 3: Implement minimal state/rerender changes**
 
-Add an injectable login function to `RouterControllerOptions`, adopt `result.id/result.label` on success, and rerender status inside the login dispatch branch.
+Add an injectable login function to `RouterControllerOptions`, adopt `result.id/result.label` as display-only state on success without changing successful-route hysteresis, and rerender status inside the login dispatch branch.
 
 - [ ] **Step 4: Verify green**
 

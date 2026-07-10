@@ -22,7 +22,7 @@ Opening uses `node:child_process.spawn` directly with platform arguments (`open`
 
 ## Immediate status ownership
 
-`performCodexLogin` returns `{ id, label, message }`. `RouterController.operations.login` adopts the successful account as the current display account before returning. Its next `status()` therefore renders the new label in automatic mode instead of `none · login`.
+`performCodexLogin` returns `{ id, label, message }`. `RouterController.operations.login` adopts the successful account as the current display account before returning. Its next `status()` therefore renders the new label in automatic mode instead of `none · login`. Display ownership is separate from automatic-routing hysteresis, which changes only after a routed request completes successfully.
 
 The `/quota-router login` dispatcher immediately calls `operations.status()` and `ctx.ui.setStatus("quota-router", status)` after login resolves and before the success notification. A failed/cancelled login does not mutate or rerender status.
 

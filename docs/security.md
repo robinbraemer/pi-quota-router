@@ -22,13 +22,13 @@ The extension does not import cookies, execute provider CLIs, or accept an envir
 
 JSON stores write a same-directory `0600` temporary file, flush it, atomically rename it, chmod the result, and sync the directory where supported. Writers lock a private lock target, reload after acquiring the lock, validate with a strict schema, and time out visibly after bounded contention.
 
-OAuth refresh has an in-process single-flight and an account-specific cross-process lock. After taking the lock, a controller reloads credentials so it can reuse a refresh already completed by another process. If a successful login replaces credentials while an older refresh is in flight, the login wins: the stale refresh can neither overwrite the new credentials nor mark them invalid. Reservations similarly combine selection and lease acquisition in one state-file critical section, then renew active foreground and primer leases until release.
+OAuth refresh has an in-process single-flight and an account-specific cross-process lock. After taking the lock, a controller reloads credentials so it can reuse a refresh already completed by another process. If a successful login replaces credentials while an older refresh, usage request, or routed request is in flight, the login wins: a stale result can neither overwrite the new credentials nor mark them invalid. Permanent invalidation is conditioned on the rejected access token still being current. Reservations similarly combine selection and lease acquisition in one state-file critical section, then renew active foreground and primer leases until release.
 
 The event log is bounded to 4 MiB and retains only one rotated predecessor. Logging failures never expose credentials or break a routed request.
 
 ## Priming safety
 
-Priming spends real quota. Two UI confirmations authorize both intentional spend and the assumed first-use rolling-window behavior for the current command only; that authorization is never persisted. Work is sequential, account-reserved, idle-only, minimal, and abortable. Only a successful observed result is persisted, after fresh usage exposes a weekly reset timestamp.
+Priming spends real quota. Two UI confirmations authorize both intentional spend and the assumed first-use rolling-window behavior for the current command only; that authorization is never persisted. Work is sequential, account-reserved, idle-only, minimal, and abortable. Every non-aborted provider attempt is followed by fresh usage observation, including attempts that report an error; only an observed weekly reset timestamp confirms the account.
 
 Never test synthetic priming with valuable production accounts until the provider behavior has been independently confirmed.
 
