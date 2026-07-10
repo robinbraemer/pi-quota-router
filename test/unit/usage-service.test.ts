@@ -119,6 +119,28 @@ describe("UsageService", () => {
     expect(calls).toBe(2);
   });
 
+  test("refreshes a cached snapshot after its short reset elapses", async () => {
+    let now = 1_000_000;
+    let calls = 0;
+    const service = createUsageService({
+      clock: () => now,
+      jitterMs: () => 0,
+      fetchUsage: async (accountId) => {
+        calls += 1;
+        return {
+          ...snapshot(accountId, now),
+          shortWindow: { usedPercent: 100, resetsAt: now + 1_000 },
+        };
+      },
+    });
+
+    await service.get("a");
+    now += 1_001;
+    await service.get("a");
+
+    expect(calls).toBe(2);
+  });
+
   test("runs a forced fetch after a request that was already in flight", async () => {
     let releaseFirst: (() => void) | undefined;
     let calls = 0;

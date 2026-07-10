@@ -595,6 +595,66 @@ describe("RouterController", () => {
     await controller.shutdown();
   });
 
+  test("records fresh exhausted usage as a recoverable quota block", async () => {
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    const paths = resolveRouterPaths(fixture.directory);
+    const now = 2_000_000_000_000;
+    const resetAt = now + 600_000;
+    let streamCalls = 0;
+    const controller = await createRouterController({
+      paths,
+      clock: () => now,
+      oauth: { refresh: async () => makeCredentials("account-1", 3_000_000_000_000) },
+      fetchImpl: async () =>
+        Response.json({
+          ...completeUsageResponse,
+          rate_limit: {
+            ...completeUsageResponse.rate_limit,
+            primary_window: {
+              ...completeUsageResponse.rate_limit.primary_window,
+              used_percent: 100,
+              reset_at: resetAt,
+            },
+          },
+        }),
+      baseStream: () => {
+        streamCalls += 1;
+        return eventStream(successfulText());
+      },
+    });
+    await controller.vault.addFromOAuth("work", makeCredentials("account-1", 3_000_000_000_000));
+    const stateStore = createAtomicJsonStore<RuntimeStateFile>({
+      path: paths.state,
+      schema: RuntimeStateFileSchema,
+      createDefault: () => structuredClone(defaultRuntimeState),
+    });
+    const cancellation = new AbortController();
+    const routed = collectController(controller, { signal: cancellation.signal });
+
+    let block = (await stateStore.read()).blocks[0];
+    for (let attempt = 0; attempt < 50 && !block; attempt += 1) {
+      await Bun.sleep(2);
+      block = (await stateStore.read()).blocks[0];
+    }
+    cancellation.abort(new Error("stop recovery wait"));
+    const events = await routed;
+
+    expect(block).toEqual({
+      accountId: expect.any(String),
+      kind: "quota",
+      blockedAt: now,
+      retryAt: resetAt,
+      estimated: false,
+    });
+    expect(streamCalls).toBe(0);
+    expect(events[0]?.type).toBe("error");
+    if (events[0]?.type === "error") {
+      expect(events[0].reason).toBe("aborted");
+    }
+    await controller.shutdown();
+  });
+
   test("uses live usage freshness and rotation configuration", async () => {
     const fixture = await createStorageFixture();
     cleanups.push(fixture.cleanup);

@@ -15,7 +15,11 @@ import { createEventLog } from "./logging/event-log.ts";
 import { createPrimingController } from "./priming/priming-controller.ts";
 import type { ProviderController } from "./provider.ts";
 import { classifyFailure, type FailureClass } from "./recovery/failure-classifier.ts";
-import { blockFromFailure, reconcileUsageBlock } from "./recovery/recovery-state.ts";
+import {
+  blockFromFailure,
+  blockFromUsage,
+  reconcileUsageBlock,
+} from "./recovery/recovery-state.ts";
 import { waitForRecovery } from "./recovery/wait-for-recovery.ts";
 import { createReservationStore } from "./routing/reservation-store.ts";
 import { selectAndReserve } from "./routing/select-and-reserve.ts";
@@ -126,6 +130,7 @@ export async function createRouterController(
 
   const persistUsageSnapshot = async (snapshot: UsageSnapshot): Promise<void> => {
     await stateStore.update((state) => {
+      const now = clock();
       const existing = state.usageSnapshots.find((value) => value.accountId === snapshot.accountId);
       const persisted =
         existing &&
@@ -133,23 +138,38 @@ export async function createRouterController(
           (existing.observedAt === snapshot.observedAt && !existing.stale && snapshot.stale))
           ? existing
           : snapshot;
+      const reconciledBlocks = state.blocks.flatMap((block) => {
+        if (
+          block.accountId !== persisted.accountId ||
+          persisted.stale ||
+          persisted.observedAt <= block.blockedAt
+        ) {
+          return [block];
+        }
+        const reconciled = reconcileUsageBlock(block, persisted, now);
+        return reconciled ? [reconciled] : [];
+      });
+      const usageBlock = persisted.stale
+        ? undefined
+        : blockFromUsage(persisted.accountId, persisted, now);
+      const currentBlock = reconciledBlocks.find(
+        (block) => block.accountId === persisted.accountId,
+      );
+      const blocks =
+        usageBlock &&
+        (!currentBlock || (currentBlock.retryAt !== undefined && currentBlock.retryAt <= now))
+          ? [
+              ...reconciledBlocks.filter((block) => block.accountId !== persisted.accountId),
+              usageBlock,
+            ]
+          : reconciledBlocks;
       return {
         ...state,
         usageSnapshots: [
           ...state.usageSnapshots.filter((value) => value.accountId !== snapshot.accountId),
           persisted,
         ],
-        blocks: state.blocks.flatMap((block) => {
-          if (
-            block.accountId !== persisted.accountId ||
-            persisted.stale ||
-            persisted.observedAt <= block.blockedAt
-          ) {
-            return [block];
-          }
-          const reconciled = reconcileUsageBlock(block, persisted, clock());
-          return reconciled ? [reconciled] : [];
-        }),
+        blocks,
       };
     });
   };

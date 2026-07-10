@@ -63,7 +63,35 @@ export function reconcileUsageBlock(
   };
 }
 
+export function blockFromUsage(
+  accountId: string,
+  usage: UsageSnapshot,
+  now: number,
+): AccountBlock | undefined {
+  const retryAt = earliestExhaustedReset(usage, now);
+  if (retryAt === undefined) {
+    return undefined;
+  }
+  return {
+    accountId,
+    kind: "quota",
+    blockedAt: now,
+    retryAt,
+    estimated: false,
+  };
+}
+
+function earliestExhaustedReset(usage: UsageSnapshot | undefined, now: number): number | undefined {
+  const resets = exhaustedResets(usage, now);
+  return resets.length > 0 ? Math.min(...resets) : undefined;
+}
+
 function latestExhaustedReset(usage: UsageSnapshot | undefined, now: number): number | undefined {
+  const resets = exhaustedResets(usage, now);
+  return resets.length > 0 ? Math.max(...resets) : undefined;
+}
+
+function exhaustedResets(usage: UsageSnapshot | undefined, now: number): number[] {
   if (!usage) {
     return undefined;
   }
@@ -78,5 +106,5 @@ function latestExhaustedReset(usage: UsageSnapshot | undefined, now: number): nu
     )
     .map((window) => window?.resetsAt)
     .filter((reset): reset is number => reset !== undefined);
-  return resets.length > 0 ? Math.max(...resets) : undefined;
+  return resets;
 }
