@@ -57,6 +57,23 @@ describe("UsageService", () => {
     expect(receivedSignal).toBeUndefined();
   });
 
+  test("hydrates a persisted snapshot before fetching", async () => {
+    let calls = 0;
+    const service = createUsageService({
+      clock: () => 1_100_000,
+      jitterMs: () => 0,
+      fetchUsage: async (accountId) => {
+        calls += 1;
+        return snapshot(accountId, 1_100_000);
+      },
+    });
+
+    service.hydrate(snapshot("a", 1_000_000));
+
+    expect(await service.get("a")).toEqual(snapshot("a", 1_000_000));
+    expect(calls).toBe(0);
+  });
+
   test("coalesces refreshes and serves a five-minute fresh value", async () => {
     let now = 1_000_000;
     let calls = 0;

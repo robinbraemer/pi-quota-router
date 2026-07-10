@@ -32,7 +32,7 @@ import {
   RuntimeStateFileSchema,
 } from "./storage/schemas.ts";
 import { createRoutedStream } from "./stream/routed-stream.ts";
-import type { Candidate, RouterConfig } from "./types.ts";
+import type { Candidate, RouterConfig, UsageSnapshot } from "./types.ts";
 import {
   CodexUsageHttpError,
   type FetchImplementation,
@@ -77,7 +77,8 @@ export async function createRouterController(
     schema: RuntimeStateFileSchema,
     createDefault: () => structuredClone(defaultRuntimeState),
   });
-  let cachedConfig = await configStore.read();
+  const [initialConfig, initialState] = await Promise.all([configStore.read(), stateStore.read()]);
+  let cachedConfig = initialConfig;
   const vault = createAccountVault({
     store: vaultStore,
     oauth: options.oauth,
@@ -120,6 +121,54 @@ export async function createRouterController(
     freshnessMs: () => cachedConfig.usageFreshnessMs,
     fetchUsage,
   });
+  for (const snapshot of initialState.usageSnapshots) {
+    usage.hydrate(snapshot);
+  }
+
+  const persistUsageSnapshot = async (snapshot: UsageSnapshot): Promise<void> => {
+    await stateStore.update((state) => {
+      const existing = state.usageSnapshots.find((value) => value.accountId === snapshot.accountId);
+      const persisted =
+        existing &&
+        (existing.observedAt > snapshot.observedAt ||
+          (existing.observedAt === snapshot.observedAt && !existing.stale && snapshot.stale))
+          ? existing
+          : snapshot;
+      return {
+        ...state,
+        usageSnapshots: [
+          ...state.usageSnapshots.filter((value) => value.accountId !== snapshot.accountId),
+          persisted,
+        ],
+        blocks: state.blocks.flatMap((block) => {
+          if (
+            block.accountId !== persisted.accountId ||
+            persisted.stale ||
+            persisted.observedAt <= block.blockedAt
+          ) {
+            return [block];
+          }
+          const reconciled = reconcileUsageBlock(block, persisted, clock());
+          return reconciled ? [reconciled] : [];
+        }),
+      };
+    });
+  };
+
+  const getUsage = async (
+    accountId: string,
+    getOptions?: Parameters<typeof usage.get>[1],
+  ): Promise<UsageSnapshot> => {
+    const persisted = (await stateStore.read()).usageSnapshots.find(
+      (snapshot) => snapshot.accountId === accountId,
+    );
+    if (persisted) {
+      usage.hydrate(persisted);
+    }
+    const snapshot = await usage.get(accountId, getOptions);
+    await persistUsageSnapshot(snapshot);
+    return snapshot;
+  };
   let displayAccountId: string | undefined;
   let lastSuccessfulAccountId: string | undefined;
   let currentLabel = "none";
@@ -131,7 +180,7 @@ export async function createRouterController(
     stateStore,
     reservations,
     usage: {
-      get: (accountId, getOptions) => usage.get(accountId, getOptions),
+      get: (accountId, getOptions) => getUsage(accountId, getOptions),
     },
     listAccountIds: async () => (await vault.list()).map((account) => account.id),
     executePrimer: async (request, signal) => {
@@ -190,8 +239,7 @@ export async function createRouterController(
         summaries.map(async (account): Promise<Candidate> => {
           const snapshot = config.manualAccountId
             ? usage.peek(account.id)
-            : await usage
-                .get(account.id, {
+            : await getUsage(account.id, {
                   ...(request.options?.signal ? { signal: request.options.signal } : {}),
                 })
                 .catch(() => {
@@ -272,7 +320,7 @@ export async function createRouterController(
       }
       const snapshot =
         failure.kind === "quota"
-          ? await usage.get(accountId, { force: true }).catch(() => usage.peek(accountId))
+          ? await getUsage(accountId, { force: true }).catch(() => usage.peek(accountId))
           : usage.peek(accountId);
       await stateStore.update((state) => ({
         ...state,
@@ -416,17 +464,7 @@ export async function createRouterController(
       }
       for (const account of selected) {
         await vault.getFreshCredential(account.id);
-        const snapshot = await usage.get(account.id, { force: true });
-        await stateStore.update((state) => ({
-          ...state,
-          blocks: state.blocks.flatMap((block) => {
-            if (block.accountId !== account.id) {
-              return [block];
-            }
-            const reconciled = reconcileUsageBlock(block, snapshot, clock());
-            return reconciled ? [reconciled] : [];
-          }),
-        }));
+        await getUsage(account.id, { force: true });
       }
       return `Refreshed ${selected.length} Codex account${selected.length === 1 ? "" : "s"}.`;
     },

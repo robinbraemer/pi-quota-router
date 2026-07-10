@@ -22,6 +22,7 @@ export interface UsageGetOptions {
 
 export interface UsageService {
   get(accountId: string, options?: UsageGetOptions): Promise<UsageSnapshot>;
+  hydrate(snapshot: UsageSnapshot): void;
   peek(accountId: string): UsageSnapshot | undefined;
   invalidate(accountId: string): void;
 }
@@ -39,6 +40,17 @@ export function createUsageService(options: UsageServiceOptions): UsageService {
   const gate = createConcurrencyGate(options.maxConcurrent ?? DEFAULT_MAX_CONCURRENT);
 
   return {
+    hydrate(snapshot) {
+      const cached = cache.get(snapshot.accountId);
+      if (
+        !cached ||
+        snapshot.observedAt > cached.observedAt ||
+        (snapshot.observedAt === cached.observedAt && cached.stale && !snapshot.stale)
+      ) {
+        cache.set(snapshot.accountId, snapshot);
+      }
+    },
+
     async get(accountId, getOptions = {}) {
       const cached = cache.get(accountId);
       if (

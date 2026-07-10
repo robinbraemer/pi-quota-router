@@ -155,4 +155,46 @@ describe("selectAndReserve", () => {
 
     expect(result.recoverableAccountIds).toEqual([]);
   });
+
+  test("only recovers the forced account during manual routing", async () => {
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    const store = createAtomicJsonStore<RuntimeStateFile>({
+      path: fixture.file,
+      schema: RuntimeStateFileSchema,
+      createDefault: () => structuredClone(defaultRuntimeState),
+    });
+    await store.update((state) => ({
+      ...state,
+      blocks: [
+        {
+          accountId: "forced",
+          kind: "auth",
+          blockedAt: NOW,
+          estimated: false,
+        },
+        {
+          accountId: "other",
+          kind: "quota",
+          blockedAt: NOW,
+          retryAt: NOW + 1000,
+          estimated: false,
+        },
+      ],
+    }));
+
+    const result = await selectAndReserve({
+      stateStore: store,
+      request: {
+        candidates: [candidate("forced", NOW), candidate("other", NOW)],
+        config: { ...defaultConfig, manualAccountId: "forced" },
+        now: NOW,
+      },
+      owner: { processId: 1, sessionId: "s", requestId: "r" },
+      now: NOW,
+    });
+
+    expect(result.reservation).toBeUndefined();
+    expect(result.recoverableAccountIds).toEqual([]);
+  });
 });

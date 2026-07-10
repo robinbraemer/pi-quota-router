@@ -788,6 +788,97 @@ describe("RouterController", () => {
     await controller.shutdown();
   });
 
+  test("updates the active label after successful reauthentication", async () => {
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    const paths = resolveRouterPaths(fixture.directory);
+    const credentials = makeCredentials("account-1", 3_000_000_000_000);
+    const controller = await createRouterController({
+      paths,
+      clock: () => 2_000_000_000_000,
+      oauth: { refresh: async () => credentials },
+      login: async () => credentials,
+      fetchImpl: async () => Response.json(completeUsageResponse),
+      baseStream: () => eventStream(successfulText()),
+    });
+    await controller.vault.addFromOAuth("old", credentials);
+    await collectController(controller);
+
+    await controller.operations.login("new", {
+      ui: {
+        notify: () => undefined,
+        select: async () => "Show authorization URL for manual use",
+        input: async () => "manual-code",
+      },
+    } as never);
+
+    expect(await controller.operations.status()).toContain("new");
+    await controller.shutdown();
+  });
+
+  test("persists usage for restart fallback and reconciles estimated blocks", async () => {
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    const paths = resolveRouterPaths(fixture.directory);
+    let now = 2_000_000_000_000;
+    let usageCalls = 0;
+    let usageOffline = false;
+    const options = {
+      paths,
+      clock: () => now,
+      oauth: { refresh: async () => makeCredentials("account-1", 3_000_000_000_000) },
+      fetchImpl: async () => {
+        usageCalls += 1;
+        if (usageOffline) {
+          throw new Error("offline");
+        }
+        return Response.json(completeUsageResponse);
+      },
+      baseStream: () => eventStream(successfulText()),
+    };
+    const first = await createRouterController(options);
+    const accountId = await first.vault.addFromOAuth(
+      "work",
+      makeCredentials("account-1", 3_000_000_000_000),
+    );
+    const stateStore = createAtomicJsonStore<RuntimeStateFile>({
+      path: paths.state,
+      schema: RuntimeStateFileSchema,
+      createDefault: () => structuredClone(defaultRuntimeState),
+    });
+    await stateStore.update((state) => ({
+      ...state,
+      blocks: [
+        {
+          accountId,
+          kind: "quota",
+          blockedAt: now,
+          retryAt: now + 3_600_000,
+          estimated: true,
+        },
+      ],
+    }));
+
+    now += 1;
+    await first.operations.refresh();
+    const persisted = await stateStore.read();
+    expect(persisted.usageSnapshots).toHaveLength(1);
+    expect(persisted.blocks).toEqual([]);
+    await first.shutdown();
+
+    now += 60_000;
+    const second = await createRouterController(options);
+    expect(await second.operations.list()).toContain("5h 88% remaining");
+    await collectController(second);
+    expect(usageCalls).toBe(1);
+    now += 300_001;
+    usageOffline = true;
+    expect((await collectController(second)).at(-1)?.type).toBe("done");
+    expect(usageCalls).toBe(2);
+    expect((await stateStore.read()).usageSnapshots[0]?.observedAt).toBe(2_000_000_000_001);
+    await second.shutdown();
+  });
+
   test("reports unsafe persisted file modes as invalid", async () => {
     const fixture = await createStorageFixture();
     cleanups.push(fixture.cleanup);

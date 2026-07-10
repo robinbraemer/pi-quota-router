@@ -36,9 +36,14 @@ export async function selectAndReserve(input: {
     const selectableCandidates = candidates.filter(
       (candidate) => !input.excludedAccountIds?.has(candidate.accountId),
     );
+    const recoveryCandidates = input.request.config.manualAccountId
+      ? candidates.filter(
+          (candidate) => candidate.accountId === input.request.config.manualAccountId,
+        )
+      : candidates;
     const recoveryDecision = selectAccount({
       ...input.request,
-      candidates,
+      candidates: recoveryCandidates,
       now: input.now,
     });
     const decision = input.excludedAccountIds?.size
@@ -50,7 +55,9 @@ export async function selectAndReserve(input: {
       : recoveryDecision;
     const recoverableAccountIds = recoveryDecision.candidates
       .filter((explanation) => {
-        const candidate = candidates.find((value) => value.accountId === explanation.accountId);
+        const candidate = recoveryCandidates.find(
+          (value) => value.accountId === explanation.accountId,
+        );
         return (
           (explanation.rejectionCode === "blocked" &&
             candidate?.block?.retryAt !== undefined &&
