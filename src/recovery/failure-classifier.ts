@@ -10,7 +10,12 @@ export function classifyFailure(error: unknown, now: number): FailureClass {
   const status = numericProperty(error, "status") ?? numericProperty(error, "statusCode");
   const code = stringProperty(error, "code").toLowerCase();
   const name = stringProperty(error, "name").toLowerCase();
-  const message = error instanceof Error ? error.message.toLowerCase() : "";
+  const message =
+    typeof error === "string"
+      ? error.toLowerCase()
+      : error instanceof Error
+        ? error.message.toLowerCase()
+        : "";
 
   if (name === "aborterror" || code === "abort_err" || code === "aborted") {
     return { kind: "aborted" };
