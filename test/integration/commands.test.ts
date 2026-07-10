@@ -19,6 +19,7 @@ describe("/quota-router commands", () => {
         "dashboard",
         "status",
         "accounts",
+        "list",
         "login",
         "use",
         "refresh",
@@ -84,6 +85,45 @@ describe("/quota-router commands", () => {
       "log:on",
     ]);
     expect(notifications).toHaveLength(13);
+  });
+
+  test("rerenders footer status before a successful login command resolves", async () => {
+    let handler: ((args: string, ctx: ExtensionCommandContext) => Promise<void>) | undefined;
+    const sequence: string[] = [];
+    const pi = {
+      registerCommand: (_name: string, options: { handler: typeof handler }) => {
+        handler = options.handler;
+      },
+    } as unknown as ExtensionAPI;
+    const operations = {
+      login: async () => {
+        sequence.push("login");
+        return "Added Codex account work (codex-a)";
+      },
+      status: async () => {
+        sequence.push("status");
+        return "Codex · work · auto";
+      },
+    } as unknown as QuotaRouterOperations;
+    const ctx = {
+      ui: {
+        notify: (message: string) => sequence.push(`notify:${message}`),
+        setStatus: (key: string, value: string) => sequence.push(`footer:${key}:${value}`),
+      },
+    } as unknown as ExtensionCommandContext;
+    registerQuotaRouterCommands(pi, operations);
+    if (!handler) {
+      throw new Error("command was not registered");
+    }
+
+    await handler("login work", ctx);
+
+    expect(sequence).toEqual([
+      "login",
+      "status",
+      "footer:quota-router:Codex · work · auto",
+      "notify:Added Codex account work (codex-a)",
+    ]);
   });
 
   test("requires both explicit confirmations before priming", async () => {

@@ -413,6 +413,15 @@ describe("RouterController", () => {
     expect(backendKey).not.toBe("pending-login");
     expect(backendKey).toContain(".");
     expect(await controller.operations.status()).toContain("work");
+    const list = await controller.operations.list();
+    expect(list).toContain("work");
+    expect(list).toContain("5h 88% remaining");
+    expect(list).toContain("7d 63% remaining");
+    const dashboard = await controller.operations.dashboard();
+    expect(dashboard).toContain("AVAILABLE COMMANDS");
+    for (const command of ["login", "list", "status", "use auto", "refresh", "prime"]) {
+      expect(dashboard).toMatch(new RegExp(`^> /quota-router ${command}`, "m"));
+    }
     expect(await controller.operations.verify()).toContain("healthy");
     expect(await controller.operations.paths()).toContain("accounts.json");
     await controller.shutdown();

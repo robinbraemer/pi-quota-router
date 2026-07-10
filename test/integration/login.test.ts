@@ -4,7 +4,8 @@ import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { performCodexLogin } from "../../src/commands/login.ts";
 import { makeCredentials } from "../fixtures/oauth.ts";
 
-const AUTH_URL = "https://example.test/oauth";
+const AUTHORIZATION_URL =
+  "https://auth.openai.com/oauth/authorize?response_type=code&client_id=codex-test&state=oauth-state";
 const OPEN_ACTION = "Open authorization URL in default browser";
 const COPY_ACTION = "Copy authorization URL";
 const MANUAL_ACTION = "Continue manually (URL shown above)";
@@ -15,119 +16,127 @@ describe("Codex command login", () => {
     const selection = new Promise<string | undefined>((resolve) => {
       resolveSelection = resolve;
     });
-    const setup = loginFixture(selection);
+    const harness = createLoginHarness(selection);
 
     const result = await Promise.race([
-      performCodexLogin(setup.options),
+      performCodexLogin(harness.options),
       Bun.sleep(100).then(() => {
         throw new Error("login waited for authorization selector");
       }),
     ]);
 
-    expect(result.id).toBe("codex-a");
-    expect(setup.added).toHaveLength(1);
-    resolveSelection?.(MANUAL_ACTION);
-  });
-
-  test("opens the authorization URL selected by the user", async () => {
-    const opened: string[] = [];
-    const copied: string[] = [];
-    const setup = loginFixture(OPEN_ACTION);
-
-    const result = await performCodexLogin({
-      ...setup.options,
-      openUrl: async (url: string) => {
-        opened.push(url);
-      },
-      copyUrl: async (url: string) => {
-        copied.push(url);
-      },
-    });
-
-    expect(setup.selections).toEqual([
-      {
-        title: "OpenAI Codex authorization",
-        options: [OPEN_ACTION, COPY_ACTION, MANUAL_ACTION],
-      },
-    ]);
-    expect(opened).toEqual([AUTH_URL]);
-    expect(copied).toEqual([]);
-    expect(setup.notices[0]).toContain(AUTH_URL);
     expect(result).toEqual({
       id: "codex-a",
       label: "work",
       message: "Added Codex account work (codex-a)",
     });
+    expect(harness.added).toHaveLength(1);
+    resolveSelection?.(MANUAL_ACTION);
   });
 
-  test("copies the authorization URL selected by the user", async () => {
-    const copied: string[] = [];
-    const setup = loginFixture(COPY_ACTION);
+  test("offers explicit actions and opens only the validated authorization URL", async () => {
+    const harness = createLoginHarness(OPEN_ACTION);
 
     await performCodexLogin({
-      ...setup.options,
-      openUrl: async () => undefined,
-      copyUrl: async (url: string) => {
-        copied.push(url);
+      ...harness.options,
+      actions: {
+        open: async (url) => harness.opened.push(url),
+        copy: async (url) => harness.copied.push(url),
       },
     });
+    await Bun.sleep(0);
 
-    expect(copied).toEqual([AUTH_URL]);
-    expect(setup.notices).toContain("Authorization URL copied to the clipboard.");
+    expect(harness.selectors).toEqual([
+      {
+        title: "OpenAI Codex authorization",
+        options: [OPEN_ACTION, COPY_ACTION, MANUAL_ACTION],
+      },
+    ]);
+    expect(harness.opened).toEqual([AUTHORIZATION_URL]);
+    expect(harness.copied).toEqual([]);
+    expect(harness.notices.join("\n")).toContain(AUTHORIZATION_URL);
   });
 
-  test("keeps the visible URL as a manual fallback on manual or cancelled selection", async () => {
-    for (const selection of [MANUAL_ACTION, undefined]) {
-      const opened: string[] = [];
-      const copied: string[] = [];
-      const setup = loginFixture(selection);
+  test("copies only the validated authorization URL", async () => {
+    const harness = createLoginHarness(COPY_ACTION);
+
+    await performCodexLogin({
+      ...harness.options,
+      actions: {
+        open: async (url) => harness.opened.push(url),
+        copy: async (url) => harness.copied.push(url),
+      },
+    });
+    await Bun.sleep(0);
+
+    expect(harness.opened).toEqual([]);
+    expect(harness.copied).toEqual([AUTHORIZATION_URL]);
+    expect(harness.copied.join(" ")).not.toContain(harness.credentials.access);
+    expect(harness.copied.join(" ")).not.toContain(harness.credentials.refresh);
+  });
+
+  test("preserves the visible URL when actions fail or selection is unavailable", async () => {
+    for (const selection of [OPEN_ACTION, COPY_ACTION, new Error("no selector")]) {
+      const harness = createLoginHarness(selection);
 
       await performCodexLogin({
-        ...setup.options,
-        openUrl: async (url: string) => {
-          opened.push(url);
-        },
-        copyUrl: async (url: string) => {
-          copied.push(url);
+        ...harness.options,
+        actions: {
+          open: async () => {
+            throw new Error("no browser");
+          },
+          copy: async () => {
+            throw new Error("no clipboard");
+          },
         },
       });
+      await Bun.sleep(0);
 
-      expect(opened).toEqual([]);
-      expect(copied).toEqual([]);
-      expect(setup.notices.join("\n")).toContain(AUTH_URL);
-      expect(setup.notices.at(-1)).toContain("manually");
+      expect(harness.notices.at(-1)).toContain(AUTHORIZATION_URL);
+      expect(harness.noticeTypes.at(-1)).toBe("warning");
     }
   });
 
-  test("falls back to the visible URL when browser, clipboard, or selector is unavailable", async () => {
-    for (const scenario of [
-      { selection: OPEN_ACTION, failure: new Error("no browser") },
-      { selection: COPY_ACTION, failure: new Error("no clipboard") },
-      { selection: new Error("no selector"), failure: undefined },
+  test("rejects unsafe authorization URLs before launch, copy, or persistence", async () => {
+    const harness = createLoginHarness(OPEN_ACTION, "javascript:alert(document.cookie)");
+
+    await expect(performCodexLogin(harness.options)).rejects.toThrow(
+      "Unexpected Codex authorization URL",
+    );
+
+    expect(harness.selectors).toEqual([]);
+    expect(harness.opened).toEqual([]);
+    expect(harness.copied).toEqual([]);
+    expect(harness.added).toEqual([]);
+    expect(harness.notices.join(" ")).not.toContain("document.cookie");
+  });
+
+  test("rejects credential-bearing or incomplete authorization URLs", async () => {
+    for (const url of [
+      "https://user:password@auth.openai.com/oauth/authorize?response_type=code&client_id=codex-test&state=oauth-state",
+      "https://auth.openai.com/oauth/authorize?response_type=code&client_id=codex-test",
+      "https://auth.openai.com/oauth/authorize?response_type=code&client_id=codex-test&state=oauth-state#injected",
     ]) {
-      const setup = loginFixture(scenario.selection);
-
-      await performCodexLogin({
-        ...setup.options,
-        openUrl: async () => {
-          if (scenario.failure) throw scenario.failure;
-        },
-        copyUrl: async () => {
-          if (scenario.failure) throw scenario.failure;
-        },
-      });
-
-      expect(setup.notices.at(-1)).toContain(AUTH_URL);
-      expect(setup.noticeTypes.at(-1)).toBe("warning");
+      const harness = createLoginHarness(OPEN_ACTION, url);
+      await expect(performCodexLogin(harness.options)).rejects.toThrow(
+        "Unexpected Codex authorization URL",
+      );
+      expect(harness.added).toEqual([]);
     }
   });
 });
 
-function loginFixture(selection: string | undefined | Error | Promise<string | undefined>) {
+function createLoginHarness(
+  selection: string | undefined | Error | Promise<string | undefined>,
+  url = AUTHORIZATION_URL,
+) {
   const notices: string[] = [];
   const noticeTypes: Array<string | undefined> = [];
-  const selections: Array<{ title: string; options: string[] }> = [];
+  const selectors: Array<{ title: string; options: string[] }> = [];
+  const opened: string[] = [];
+  const copied: string[] = [];
   const added: Array<{ label: string; credentials: OAuthCredentials }> = [];
+  const credentials = makeCredentials("account-1", 3_000_000_000_000);
   const ctx = {
     ui: {
       notify: (message: string, type?: string) => {
@@ -135,7 +144,7 @@ function loginFixture(selection: string | undefined | Error | Promise<string | u
         noticeTypes.push(type);
       },
       select: async (title: string, options: string[]) => {
-        selections.push({ title, options });
+        selectors.push({ title, options });
         if (selection instanceof Error) throw selection;
         return await selection;
       },
@@ -143,29 +152,29 @@ function loginFixture(selection: string | undefined | Error | Promise<string | u
     },
   } as unknown as ExtensionCommandContext;
   return {
+    ctx,
     notices,
     noticeTypes,
-    selections,
+    selectors,
+    opened,
+    copied,
     added,
+    credentials,
     options: {
       ctx,
       label: "work",
       vault: {
-        addFromOAuth: async (label: string, credentials: OAuthCredentials) => {
-          added.push({ label, credentials });
+        addFromOAuth: async (label: string, oauthCredentials: OAuthCredentials) => {
+          added.push({ label, credentials: oauthCredentials });
           return "codex-a";
         },
       },
       login: async (
-        callbacks: Parameters<typeof performCodexLogin>[0]["login"] extends infer T
-          ? T extends (...args: infer _Args) => unknown
-            ? Parameters<T>[0]
-            : never
-          : never,
+        callbacks: Parameters<NonNullable<Parameters<typeof performCodexLogin>[0]["login"]>>[0],
       ) => {
-        callbacks.onAuth({ url: AUTH_URL, instructions: "Sign in" });
+        callbacks.onAuth({ url, instructions: "Provider-controlled instructions" });
         expect(await callbacks.onPrompt({ message: "Code?" })).toBe("manual-code");
-        return makeCredentials("account-1", 3_000_000_000_000);
+        return credentials;
       },
     },
   };

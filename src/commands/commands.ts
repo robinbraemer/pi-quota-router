@@ -5,6 +5,7 @@ export interface QuotaRouterOperations {
   dashboard(): Promise<string>;
   status(): Promise<string>;
   accounts(): Promise<string>;
+  list(): Promise<string>;
   login(label: string | undefined, ctx: ExtensionCommandContext): Promise<string>;
   use(selector: string): Promise<string>;
   refresh(selector?: string): Promise<string>;
@@ -37,6 +38,9 @@ export function registerQuotaRouterCommands(
           case "accounts":
           case "list":
             result = await operations.accounts();
+            break;
+          case "list":
+            result = await operations.list();
             break;
           case "login":
             result = await operations.login(parsed.args[0], ctx);

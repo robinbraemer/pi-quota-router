@@ -35,11 +35,11 @@ Open normal Pi and add each Codex account with a distinct label:
 ```text
 /quota-router login work
 /quota-router login personal
-/quota-router accounts
+/quota-router list
 /quota-router status
 ```
 
-Each `login` opens Pi's normal OpenAI Codex OAuth flow. The router keeps its own multi-account vault and does not rewrite Pi's `auth.json`.
+Each `login` starts Pi's normal OpenAI Codex OAuth flow, then asks whether to open the authorization URL in the default browser, copy it, or show it for manual use. Browser and clipboard failures leave the validated URL visible for manual use. After a successful login, the footer is refreshed before the command returns. The router keeps its own multi-account vault and does not rewrite Pi's `auth.json`.
 
 When the authorization URL is ready, Pi shows an explicit action selector: open it in the default browser, copy it to the clipboard, or continue manually. The full URL always remains visible, including when a browser, clipboard, or interactive selector is unavailable, and the selector does not block OAuth completion. After credentials are saved, the footer rerenders immediately with the account label; it does not wait for a later agent turn. This display update does not count as a successful route or affect automatic-routing hysteresis. Reauthenticating an existing identity also clears its persisted authentication block, and a later failure from the replaced credential cannot invalidate the new login.
 
@@ -91,11 +91,11 @@ The confirmations authorize only the current command. They do not change `config
 
 | Command | Purpose |
 | --- | --- |
-| `/quota-router` | Show current status plus the highlighted quick-command guide. |
+| `/quota-router` | Show compact status plus highlighted common commands. |
 | `/quota-router help` | Show the same discoverable command guide. |
 | `/quota-router status` | Show the current compact routing status. |
-| `/quota-router list` | List managed ids, labels, and reauthentication state. |
-| `/quota-router accounts` | List managed ids, labels, and reauthentication state. |
+| `/quota-router list` | List managed ids, labels, reauthentication state, and cached quota state. |
+| `/quota-router accounts` | Compatibility alias for `list`. |
 | `/quota-router login [label]` | Add or reauthenticate a Codex account through Pi OAuth. |
 | `/quota-router use <account-or-label>` | Force a specific account, including below automatic headroom floors. |
 | `/quota-router use auto` | Return to quota-aware automatic routing. |

@@ -344,26 +344,43 @@ export async function createRouterController(
     return matches;
   };
 
+  const listAccounts = async (): Promise<string> => {
+    const accounts = await vault.list();
+    return accounts.length === 0
+      ? "No managed Codex accounts. Run /quota-router login."
+      : accounts
+          .map((account) => {
+            const snapshot = usage.peek(account.id);
+            const quota = snapshot
+              ? [
+                  `5h ${remainingPercent(snapshot.shortWindow.usedPercent)}% remaining`,
+                  snapshot.weeklyWindow
+                    ? `7d ${remainingPercent(snapshot.weeklyWindow.usedPercent)}% remaining`
+                    : "7d quota unknown",
+                ].join(" · ")
+              : "quota unknown";
+            return `${account.id} · ${account.label} · ${
+              account.needsReauth ? "reauth required" : "ready"
+            } · ${quota}`;
+          })
+          .join("\n");
+  };
+
   const operations: QuotaRouterOperations = {
     dashboard: statusText,
     status: statusText,
-    async accounts() {
-      const accounts = await vault.list();
-      return accounts.length === 0
-        ? "No managed Codex accounts. Run /quota-router login."
-        : accounts
-            .map(
-              (account) =>
-                `${account.id} · ${account.label} · ${account.needsReauth ? "reauth required" : "ready"}`,
-            )
-            .join("\n");
-    },
+    accounts: listAccounts,
+    list: listAccounts,
     async login(label, ctx) {
       const result = await performCodexLogin({
         ctx,
         ...(label ? { label } : {}),
         vault,
         ...(options.login ? { login: options.login } : {}),
+        onAccountAdded: ({ id, label: addedLabel }) => {
+          displayAccountId = id;
+          currentLabel = addedLabel;
+        },
       });
       await stateStore.update((state) => ({
         ...state,
@@ -373,6 +390,7 @@ export async function createRouterController(
       }));
       displayAccountId = result.id;
       currentLabel = result.label;
+      usage.invalidate(result.id);
       return result.message;
     },
     async use(selector) {
@@ -518,4 +536,8 @@ export async function createRouterController(
 
 function formatMode(mode: number | undefined): string {
   return mode === undefined ? "missing" : mode.toString(8).padStart(4, "0");
+}
+
+function remainingPercent(usedPercent: number): number {
+  return Math.max(0, Math.round(100 - usedPercent));
 }

@@ -45,7 +45,7 @@ export function parseQuotaRouterCommand(input: string): {
   const candidate = tokens[0];
   if (!candidate || !COMMANDS.has(candidate as QuotaRouterCommand)) {
     throw new CommandParseError(
-      "Unknown quota-router command. Use help, login, list, status, use, refresh, prime, policy, reset, verify, path, or log.",
+      "Unknown quota-router command. Use help, status, list, accounts, login, use, refresh, prime, policy, reset, verify, path, or log.",
     );
   }
   const command = candidate as QuotaRouterCommand;

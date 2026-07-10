@@ -10,6 +10,12 @@ Credentials do not belong in `state.json`, `config.json`, `events.ndjson`, statu
 
 The router intentionally does not modify normal Pi's `auth.json`. Duplicate logins are deduplicated by a non-secret managed id derived from SHA-256 of the Codex account id.
 
+## Local authorization handoff
+
+The login selector only accepts the expected `https://auth.openai.com/oauth/authorize` origin and path with code response type, client id, and OAuth state, rejects fragments and embedded URL credentials, and never passes provider instructions to a process launcher. Browser and clipboard tools are started with fixed executable names, explicit argv, `shell: false`, and—in the clipboard case—the validated URL on stdin. The only value opened, copied, or shown by this handoff is that validated authorization URL; OAuth credentials and account tokens are not available to the launcher boundary.
+
+The authorization URL contains short-lived OAuth flow state, so it is displayed only as the explicit manual fallback and is never written to router diagnostics. If selection, browser launch, or clipboard access is unavailable, login storage remains unchanged until the normal OAuth exchange succeeds, and the same validated URL remains available for manual opening or copying.
+
 ## Network destinations
 
 - Usage requests go only to `https://chatgpt.com/backend-api/wham/usage`, with the access token in `Authorization` and the raw account id in `ChatGPT-Account-Id`.
