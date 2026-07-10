@@ -70,7 +70,7 @@ Scores within 10% are treated as tied. The router retains the current eligible a
 
 ## Priming untouched accounts
 
-Priming deliberately sends a real minimal Codex request. It is not a read-only quota check. Do not enable it unless you have independently confirmed that first use starts the weekly rolling window for these accounts.
+Priming deliberately sends a real minimal Codex request. It is not a read-only quota check. Do not run it unless you have independently confirmed that first use starts the weekly rolling window for these accounts.
 
 Run:
 
@@ -83,7 +83,7 @@ Pi asks for two separate confirmations:
 1. Confirm that a minimal request may spend quota.
 2. Confirm that first-use rolling-window behavior is known.
 
-After both confirmations, the router sends exactly one `.` request with no history, no tools, the current model, the lowest reasoning level, and `maxTokens: 1`. It force-refreshes usage, observes the resulting quota state, marks the account primed only after seeing a weekly reset timestamp, and then stops. A failed or inconclusive attempt waits one hour before another explicit retry.
+After both confirmations, the router sends exactly one `.` request with no history, no tools, the selected Codex model, the lowest reasoning level, and `maxTokens: 1`. It force-refreshes usage, observes the resulting quota state, marks the account primed only after seeing a weekly reset timestamp, and then stops. If the selected model is not a registered Codex model, the command stops before any usage or provider request and does not start the retry cooldown. A failed or inconclusive attempt waits one hour before another explicit retry.
 
 The confirmations authorize only the current command. They do not change `config.json`, enable idle sweeps, or authorize future background priming. `/quota-router prime all` scans for the first eligible untouched account but still sends at most one provider request; run the command again and reconfirm to prime another account. Persistent automatic priming remains disabled unless a separate explicit action is introduced and confirmed. Once a clock is observed, the account enters normal urgency routing.
 
@@ -110,7 +110,7 @@ The confirmations authorize only the current command. They do not change `config
 | `/quota-router path` | Print every router data path. |
 | `/quota-router log [on\|off]` | Show, enable, or disable the bounded diagnostic event log. |
 
-A manual account bypasses automatic usage/headroom ranking, but it is still rejected if it needs reauthentication or has an active block/reservation. Return to `auto` when the exceptional task is finished.
+A manual account is selected without a preliminary usage fetch and bypasses automatic freshness, untouched-clock, and headroom ranking. It is still rejected if it needs reauthentication or has an active block/reservation. Return to `auto` when the exceptional task is finished.
 
 ## Footer legend
 

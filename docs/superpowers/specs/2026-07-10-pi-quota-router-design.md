@@ -171,6 +171,7 @@ The provider override is the only component coupled to Pi's streaming types. Sel
 - Refreshes tokens five minutes before expiry.
 - Uses one in-process promise and one cross-process lock per account refresh.
 - Reloads after acquiring the lock so a peer's completed refresh is reused.
+- Preserves credentials from a successful login that races an older refresh result or failure.
 - Never reads or writes Pi's `auth.json` during normal operation.
 
 ### `src/storage/atomic-json-store.ts`
@@ -215,7 +216,7 @@ The provider override is the only component coupled to Pi's streaming types. Sel
 ### `src/priming/priming-controller.ts`
 
 - Finds accounts confirmed as untouched with no weekly reset clock.
-- Requires explicit priming policy enablement and rolling-window confirmation.
+- Accepts either persistent policy authorization for an explicit sweep or ephemeral one-shot authorization for a confirmed command.
 - Waits until Pi is idle and no foreground routed request is active.
 - Reserves one account, sends a minimal no-tool Codex request, then force-refreshes usage.
 - Marks success only when a weekly reset timestamp is observed.
@@ -313,7 +314,7 @@ Defaults:
 - `priming.maximumPerSweep`: `1`
 - `priming.retryCooldownMs`: `3600000`
 
-Synthetic priming requires both priming booleans. `/quota-router prime` explains that the action deliberately spends a small amount of quota and records both confirmations before attempting any account.
+Persistent synthetic sweeps require both priming booleans, which default to `false`. `/quota-router prime` instead obtains two ephemeral confirmations for that invocation and never changes those booleans.
 
 ### Runtime state
 
@@ -372,18 +373,17 @@ Higher urgency wins because it represents more quota that must be spent per hour
 
 ### Tie-breakers
 
-Candidates within 10% of the highest urgency are materially tied. Resolve ties in this order:
+Candidates within 10% of the highest urgency are materially tied. If the current account is in that band and passes all eligibility checks, retain it first to preserve prompt-cache affinity. Otherwise resolve the band in this order:
 
 1. Least weekly remaining quota that still passes the 3% headroom floor.
 2. Most 5-hour remaining quota.
-3. Current account, to preserve prompt-cache affinity.
-4. Stable account id lexical order for deterministic behavior.
+3. Stable account id lexical order for deterministic behavior.
 
-The current account is retained when its urgency is within 10% of the winner and it passes all eligibility checks. This avoids account churn for negligible score improvements.
+This avoids account churn for negligible score improvements while keeping selection deterministic when the current account is not retained.
 
 ### Manual override
 
-A manually selected account bypasses automatic freshness, untouched-clock, and headroom checks, but remains unavailable when it needs reauthentication, has an active block, or has a live reservation. The override stays configured until the operator runs `/quota-router use auto`; the router never silently substitutes an automatically ranked account.
+A manually selected account is chosen without a preliminary usage fetch and bypasses automatic freshness, untouched-clock, and headroom checks, but remains unavailable when it needs reauthentication, has an active block, or has a live reservation. The override stays configured until the operator runs `/quota-router use auto`; the router never silently substitutes an automatically ranked account.
 
 ### Headroom limitation
 
@@ -406,7 +406,7 @@ The operator must confirm both deliberate quota spend and the first-use rolling-
 
 The synthetic primer:
 
-- Uses the current Codex model to avoid crossing capability pools.
+- Uses the selected registered Codex model to avoid crossing capability pools; an unsupported model is rejected before usage or provider work and without a retry cooldown.
 - Uses no tools and no conversation history.
 - Uses the lowest supported reasoning level.
 - Sends `.` as the prompt with a one-token output budget.
@@ -437,6 +437,7 @@ An explicit forced refresh reconciles an estimated cooldown: available quota cle
 
 - Refresh expired tokens before the request.
 - Coalesce concurrent refreshes.
+- Preserve newer credentials when a successful login races an older refresh result or definitive refresh failure.
 - On the first generic `401`, force-refresh once and retry the same account before rotating.
 - Definitive `invalid_grant`, revoked-token, malformed access-token, or identity-mismatch responses mark the account `needsReauth` immediately.
 - A transient refresh network failure causes a one-minute cooldown, not permanent invalidation.

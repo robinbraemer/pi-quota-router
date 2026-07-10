@@ -21,12 +21,14 @@ Start with:
 | Account says `reauth required` | Run `/quota-router login <same-label>` with that Codex identity. A successful duplicate login replaces the saved credentials and clears its authentication block. |
 | Browser or clipboard authorization action fails | Use the authorization URL printed above the selector. The URL is always preserved as a manual fallback. |
 | Footer still shows `none · login` after successful login | Run `/quota-router list` to confirm the account, then `/quota-router status`. Current versions rerender immediately; update the Git package if the stale footer persists. |
+| `Ambiguous Codex account label` | Run `/quota-router list` and repeat `use`, `refresh`, or `prime` with the intended managed account id. Duplicate labels are never resolved arbitrarily. |
 | `no_eligible_accounts` | Refresh usage, inspect policy/headroom, prime confirmed untouched accounts, or wait for cooldowns. A fresh non-exhausted result clears an estimated block. A deliberate `/quota-router use <account>` can bypass automatic headroom. |
 | `manual_account_unavailable` | Reauthenticate/clear the account's block, wait for its reservation, or run `/quota-router use auto`. |
 | `not_authorized` from prime | Invoke `/quota-router prime ...` interactively and accept both confirmations. Authorization applies only to that invocation. |
 | `not_candidate` from prime | The account is already confirmed, is not untouched, or is inside the one-hour primer retry cooldown. |
 | `reserved` from prime | Another foreground/primer request owns the account or another process owns the singleton sweep. Wait for active work to finish; a crashed owner's lease expires within two minutes. |
 | `busy` from prime | Foreground agent work is active. Wait until Pi settles. |
+| `Codex model ... is unavailable for priming` | Select a registered `openai-codex` model and invoke prime again. The rejected command made no usage/provider request and did not start the retry cooldown. |
 | `inconclusive` from prime | No weekly reset appeared after the minimal request. Wait one hour; do not assume the rolling-window behavior. |
 | `failed` from prime | The minimal provider request failed. Check connectivity/authentication, then retry after one hour. |
 
@@ -42,6 +44,7 @@ Start with:
 | `AccountNotFoundError` | A command referenced a removed/unknown managed id. | Run `/quota-router accounts` and use the current id or label. |
 | `StoreValidationError` | Persisted JSON is malformed or violates the version-one schema. | Back up the router directory, repair the file using the documented schema, or move only non-credential config/state aside for recreation. |
 | `StoreLockTimeoutError` | A JSON state lock remained contended for five seconds. | Wait for peer work; check for a stuck Pi process. Reset reservations only after confirming no peer is active. |
+| `ReservationLostError` | An active request's persisted lease disappeared or could not be renewed. | Retry the turn after checking peer processes. Do not reset reservations while any Pi process is active. |
 | `CodexUsageParseError` | The usage endpoint returned an unsupported body. | Update Pi Quota Router; preserve a redacted response shape if filing an issue. Never post headers/tokens. |
 | `CodexUsageHttpError` | Usage returned HTTP failure, timed out, or did not complete. | Check connectivity/authentication, run `refresh all`, and retry. Last-good data can be used conservatively for up to 24 hours. |
 | `RecoveryWaitTimeoutError` | No account recovered during the six-hour bounded wait. | Refresh/login accounts or wait for the actual reset before retrying. |

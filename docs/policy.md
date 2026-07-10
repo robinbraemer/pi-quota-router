@@ -45,7 +45,7 @@ Stable managed ids are truncated SHA-256 derivatives of raw Codex account ids. R
 
 ## Manual routing
 
-`/quota-router use <account>` sets a deliberate manual override. A manual account bypasses automatic freshness, untouched-clock, and 10%/3% headroom checks. This makes the command genuinely forceful.
+`/quota-router use <account>` sets a deliberate manual override. The router does not fetch usage before selecting that account, and the account bypasses automatic freshness, untouched-clock, and 10%/3% headroom checks. This makes the command genuinely forceful.
 
 The manual account is still unavailable when it needs reauthentication, has an active block, or has a live reservation. The router does not silently fall back to an automatically ranked account in that case; it reports `manual_account_unavailable`. Use `/quota-router use auto` to resume automatic ranking.
 
@@ -77,6 +77,6 @@ When all known accounts are temporarily unavailable, recovery also rechecks the 
 
 `/quota-router prime` obtains both confirmations for the current invocation only. It does not set `priming.enabled` or `priming.confirmedFirstUseRollingWindow`, so it cannot authorize a later idle sweep or background request.
 
-An untouched candidate must have a fresh snapshot, 0% used in both windows, and no weekly reset timestamp. The primer sends one `.` request with no history/tools, minimum reasoning, and one output token. It succeeds only if a forced post-request usage refresh reveals a weekly reset timestamp. Otherwise the account waits one hour before another primer attempt.
+An untouched candidate must have a fresh snapshot, 0% used in both windows, and no weekly reset timestamp. The primer sends one `.` request with no history/tools, the selected Codex model, minimum reasoning, and one output token. An unsupported selected model is rejected before usage, quota spend, or retry state changes. The primer succeeds only if a forced post-request usage refresh reveals a weekly reset timestamp. Otherwise the account waits one hour before another primer attempt.
 
 One command sends at most one provider request. With `all`, the router skips ineligible accounts until it finds the first candidate, makes that one attempt, refreshes/records the observed quota state, and stops. Agent-settled events never schedule priming. Persistent automatic priming remains disabled pending a separate explicit action and confirmation contract.
