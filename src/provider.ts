@@ -6,8 +6,8 @@ import type {
   StreamFunction,
 } from "@earendil-works/pi-ai";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
-import { OPENAI_CODEX_MODELS } from "@earendil-works/pi-ai/providers/openai-codex.models";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { codexModels } from "./codex-runtime.ts";
 
 export interface ProviderController {
   bootstrapApiKey: string;
@@ -19,7 +19,7 @@ export function registerQuotaRouterProvider(
   pi: ExtensionAPI,
   controller: ProviderController,
 ): void {
-  const models = Object.values(OPENAI_CODEX_MODELS).map((source) => ({
+  const models = codexModels.map((source) => ({
     id: source.id,
     name: source.name,
     baseUrl: source.baseUrl,

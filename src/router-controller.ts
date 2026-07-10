@@ -1,14 +1,13 @@
 import { randomUUID } from "node:crypto";
 import type {
   Context,
-  Model,
   SimpleStreamOptions,
   StreamFunction,
   ThinkingLevel,
 } from "@earendil-works/pi-ai";
-import { OPENAI_CODEX_MODELS } from "@earendil-works/pi-ai/providers/openai-codex.models";
 import type { AccountVault, CodexOAuthClient } from "./accounts/account-vault.ts";
 import { createAccountVault } from "./accounts/account-vault.ts";
+import { codexModels, codexModelsById } from "./codex-runtime.ts";
 import type { QuotaRouterOperations } from "./commands/commands.ts";
 import { performCodexLogin } from "./commands/login.ts";
 import { defaultConfig } from "./config.ts";
@@ -98,7 +97,7 @@ export async function createRouterController(
   });
   let currentAccountId: string | undefined;
   let currentLabel = "none";
-  let currentModelId = Object.keys(OPENAI_CODEX_MODELS)[0] ?? "";
+  let currentModelId = codexModels[0]?.id ?? "";
   let loggingEnabled = true;
 
   const priming = createPrimingController({
@@ -110,9 +109,7 @@ export async function createRouterController(
     },
     listAccountIds: async () => (await vault.list()).map((account) => account.id),
     executePrimer: async (request, signal) => {
-      const model = OPENAI_CODEX_MODELS[request.modelId as keyof typeof OPENAI_CODEX_MODELS] as
-        | Model<"openai-codex-responses">
-        | undefined;
+      const model = codexModelsById.get(request.modelId);
       if (!model) {
         throw new Error("The active Codex model is unavailable for priming");
       }

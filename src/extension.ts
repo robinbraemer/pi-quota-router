@@ -1,6 +1,6 @@
-import { streamSimple as codexStreamSimple } from "@earendil-works/pi-ai/api/openai-codex-responses";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { codexOAuthClient } from "./accounts/oauth-client.ts";
+import { codexStreamSimple } from "./codex-runtime.ts";
 import { registerQuotaRouterCommands } from "./commands/commands.ts";
 import { registerQuotaRouterProvider } from "./provider.ts";
 import { createRouterController, type RouterController } from "./router-controller.ts";

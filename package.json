@@ -21,6 +21,7 @@
     "lint": "biome check .",
     "typecheck": "tsgo --noEmit",
     "check": "bun run lint && bun run typecheck && bun test",
+    "smoke:install": "bun run scripts/smoke-install.ts",
     "pack:check": "bun pm pack --dry-run --ignore-scripts"
   },
   "peerDependencies": {
