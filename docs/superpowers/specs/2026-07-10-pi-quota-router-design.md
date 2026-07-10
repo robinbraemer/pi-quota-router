@@ -27,7 +27,7 @@ The router does not merely choose the lowest usage percentage. It:
 - Preserve the active Codex model, model capability, thinking level, and user expectations.
 - Route automatically among equivalent Codex OAuth accounts.
 - Optimize effective usable quota over time rather than evenly balancing percentages.
-- Support automatic priming when the operator explicitly confirms that the weekly window starts on first use.
+- Support one-shot priming when the operator explicitly confirms both quota spend and first-use rolling-window behavior for that invocation.
 - Avoid starting work on an account that lacks conservative 5-hour or weekly headroom.
 - Keep routing deterministic, explainable, observable, abortable, and safe under multiple Pi processes.
 - Recover transparently from pre-output quota, authentication, and token-refresh failures.
@@ -402,7 +402,7 @@ An account is a priming candidate only when a fresh usage snapshot shows:
 - Healthy authentication.
 - No cooldown, reservation, or prior successful primer.
 
-The operator must enable `priming.enabled` and confirm `confirmedFirstUseRollingWindow`. The extension does not ship a provider claim that first use always starts the window.
+The operator must confirm both deliberate quota spend and the first-use rolling-window assumption for every `/quota-router prime` invocation. Those confirmations are ephemeral and do not mutate the persistent priming booleans. The extension does not ship a provider claim that first use always starts the window.
 
 The synthetic primer:
 
@@ -411,12 +411,14 @@ The synthetic primer:
 - Uses the lowest supported reasoning level.
 - Sends `.` as the prompt with a one-token output budget.
 - Runs only while Pi is idle.
-- Runs one account at a time.
+- Sends at most one provider request per confirmed command, including `prime all`.
 - Holds a reservation for the full request.
 - Force-refreshes usage after completion.
 - Succeeds only after observing a weekly reset timestamp.
 
 If the reset timestamp remains absent, the account is not marked primed. It receives a one-hour primer retry cooldown and is not used for foreground work unless manually selected.
+
+The command force-refreshes and records the observed quota state, then stops. Agent settlement does not schedule background primer work. Persistent automatic priming remains disabled unless a separate explicit action and confirmation contract is added later.
 
 ## Quota and failure handling
 
@@ -482,7 +484,7 @@ One command family:
 - `/quota-router login [label]` — add or update a Codex OAuth account.
 - `/quota-router use <account|auto>` — set or clear manual override.
 - `/quota-router refresh [account|all]` — refresh OAuth if needed and force fresh quota usage.
-- `/quota-router prime [account|all]` — confirm and run primers for selected untouched accounts.
+- `/quota-router prime [account|all]` — confirm one minimal request, refresh the selected account's quota, then stop.
 - `/quota-router policy` — print the active routing, headroom, and priming configuration.
 - `/quota-router reset <cooldowns|reservations|priming|all>` — clear recoverable state without deleting credentials.
 - `/quota-router verify` — validate persisted schemas and required file permissions.
@@ -533,6 +535,7 @@ Each atomic selection persists a credential-free `lastSelection` explanation in 
 
 - No primer runs without both confirmations.
 - One singleton primer runs across concurrent controllers.
+- One confirmed command sends at most one provider request and never enables future background work.
 - Primer uses no history or tools.
 - Primer does not block a foreground request.
 - Successful confirmation requires a newly observed weekly reset.

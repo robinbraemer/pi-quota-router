@@ -28,7 +28,6 @@ export function createExtension(
     });
     pi.on("agent_settled", async (_event, ctx) => {
       controller.setForegroundActive(false);
-      controller.schedulePriming();
       ctx.ui.setStatus("quota-router", await controller.operations.status());
     });
     pi.on("session_shutdown", async () => {

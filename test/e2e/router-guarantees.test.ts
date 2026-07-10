@@ -180,41 +180,51 @@ describe("quota router end-to-end guarantees", () => {
     expect(postEvents.map((event) => event.type)).toEqual(["start", "text_start", "error"]);
   });
 
-  test("requires confirmation, primes an untouched account once, then routes it normally", async () => {
+  test("primes one untouched account without enabling future background priming", async () => {
     const home = await createIsolatedPiHome();
     cleanups.push(home.cleanup);
-    const credential = makeCredentials("untouched-account", NOW + 3_600_000);
-    let primed = false;
+    const credentials = [
+      makeCredentials("untouched-account-a", NOW + 3_600_000),
+      makeCredentials("untouched-account-b", NOW + 3_600_000),
+    ] as const;
+    let primedAccountId: string | undefined;
     let primerCalls = 0;
     let normalCalls = 0;
     const controller = await createRouterController({
       paths: resolveRouterPaths(home.agentDirectory),
       clock: () => NOW,
-      oauth: { refresh: async () => credential },
-      fetchImpl: fakeCodexUsage(() =>
+      oauth: { refresh: async () => credentials[0] },
+      fetchImpl: fakeCodexUsage((accountId) =>
         usageResponse({
           shortUsed: 0,
           weeklyUsed: 0,
-          ...(primed ? { weeklyResetAt: NOW + 7 * 24 * 3_600_000 } : {}),
+          ...(primedAccountId === accountId ? { weeklyResetAt: NOW + 7 * 24 * 3_600_000 } : {}),
         }),
       ),
       baseStream: (_model, _context, options) => {
         if (options?.maxTokens === 1) {
           primerCalls += 1;
-          primed = true;
+          primedAccountId =
+            options.apiKey === credentials[0]?.access
+              ? "untouched-account-a"
+              : "untouched-account-b";
         } else {
           normalCalls += 1;
         }
         return eventStream(successfulText());
       },
     });
-    await controller.vault.addFromOAuth("untouched", credential);
+    await controller.vault.addFromOAuth("untouched-a", credentials[0]);
+    await controller.vault.addFromOAuth("untouched-b", credentials[1]);
 
-    expect(await controller.operations.prime()).toContain("not_authorized");
-    expect(primerCalls).toBe(0);
-    await controller.operations.confirmPriming();
     expect(await controller.operations.prime()).toContain("confirmed");
-    expect(await controller.operations.prime()).toContain("not_candidate");
+    expect(primerCalls).toBe(1);
+    expect(JSON.parse(await controller.operations.policy()).priming).toMatchObject({
+      enabled: false,
+      confirmedFirstUseRollingWindow: false,
+    });
+    controller.schedulePriming();
+    await Bun.sleep(10);
     expect(primerCalls).toBe(1);
     expect((await collect(controller.routedStream(model, context))).at(-1)?.type).toBe("done");
     expect(normalCalls).toBe(1);

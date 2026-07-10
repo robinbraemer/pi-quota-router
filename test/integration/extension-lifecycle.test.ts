@@ -4,7 +4,7 @@ import { createExtension } from "../../src/extension.ts";
 import type { RouterController } from "../../src/router-controller.ts";
 
 describe("extension lifecycle", () => {
-  test("tracks foreground state, schedules idle priming, and shuts down", async () => {
+  test("tracks foreground state without scheduling background priming, and shuts down", async () => {
     const handlers = new Map<string, (...args: never[]) => unknown>();
     const foreground: boolean[] = [];
     let priming = 0;
@@ -41,7 +41,7 @@ describe("extension lifecycle", () => {
     await handlers.get("agent_settled")?.({} as never, ctx as never);
     await handlers.get("session_shutdown")?.({} as never, ctx as never);
     expect(foreground).toEqual([true, false]);
-    expect(priming).toBe(1);
+    expect(priming).toBe(0);
     expect(shutdown).toBe(1);
   });
 });

@@ -16,7 +16,7 @@
 - Use only public package exports from @earendil-works/pi-ai and @earendil-works/pi-coding-agent.
 - Never read or mutate Pi's auth.json.
 - Never log, persist outside the vault, or expose access tokens, refresh tokens, JWT payloads, or raw account ids.
-- A synthetic primer is allowed only after both persisted confirmation flags are true.
+- A synthetic primer is allowed only after both interactive confirmations for that one invocation; the command must not persist automatic-priming authorization.
 - A stream retry is allowed only before text, thinking, or tool-call content begins.
 - Every state mutation must be atomic under a cross-process lock.
 - Commit after each task only when the named tests and checks pass.
@@ -641,7 +641,7 @@ Prove:
 - candidate requires fresh 0% in both windows and no weekly reset;
 - foreground activity prevents a primer from starting;
 - primer sweep lease prevents two Pi processes from priming;
-- accounts run sequentially;
+- one confirmed command sends at most one provider request, even when scanning all accounts;
 - request contains no history or tools, exact prompt ".", lowest supported reasoning, and smallest output budget;
 - usage is force-refreshed after success;
 - only an observed weekly reset marks confirmed;
@@ -657,7 +657,7 @@ Run:
 
 Expected: module-not-found failures.
 
-**Step 3: Implement an idle-only controller**
+**Step 3: Implement an idle-only, one-shot controller**
 
     export interface PrimingController {
       scheduleSweep(reason: "startup" | "manual" | "idle"): void;
@@ -667,6 +667,8 @@ Expected: module-not-found failures.
     }
 
 The synthetic request uses the same current model as Pi, never switches models, and bypasses normal routing only after explicitly reserving the target account.
+
+Command confirmations authorize only the current invocation. They do not persist the automatic-priming flags, and normal agent settlement does not schedule a sweep. The `all` selector may skip ineligible accounts but stops after the first actual primer request and its forced usage refresh.
 
 **Step 4: Verify and commit**
 
@@ -968,7 +970,7 @@ Using throwaway test accounts only:
 5. run a prompt and confirm model/thinking identity is unchanged;
 6. simulate one pre-output quota failure and verify a single rotation;
 7. confirm no rotation occurs after visible output;
-8. enable and confirm priming, then verify one untouched account obtains an observed weekly reset;
+8. confirm one-shot priming, then verify exactly one untouched account obtains an observed weekly reset and no background primer is scheduled;
 9. run two Pi processes and verify distinct leases;
 10. inspect permissions and redacted logs.
 

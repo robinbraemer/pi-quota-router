@@ -75,8 +75,8 @@ When all known accounts are temporarily unavailable, recovery also rechecks the 
 
 ## Priming policy
 
-Both `priming.enabled` and `priming.confirmedFirstUseRollingWindow` must be true. The `/quota-router prime` command obtains both confirmations before setting them.
+`/quota-router prime` obtains both confirmations for the current invocation only. It does not set `priming.enabled` or `priming.confirmedFirstUseRollingWindow`, so it cannot authorize a later idle sweep or background request.
 
 An untouched candidate must have a fresh snapshot, 0% used in both windows, and no weekly reset timestamp. The primer sends one `.` request with no history/tools, minimum reasoning, and one output token. It succeeds only if a forced post-request usage refresh reveals a weekly reset timestamp. Otherwise the account waits one hour before another primer attempt.
 
-Background idle sweeps prime at most one account sequentially. Successfully primed accounts are recorded and enter normal urgency routing.
+One command sends at most one provider request. With `all`, the router skips ineligible accounts until it finds the first candidate, makes that one attempt, refreshes/records the observed quota state, and stops. Agent-settled events never schedule priming. Persistent automatic priming remains disabled pending a separate explicit action and confirmation contract.

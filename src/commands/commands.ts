@@ -9,7 +9,6 @@ export interface QuotaRouterOperations {
   use(selector: string): Promise<string>;
   refresh(selector?: string): Promise<string>;
   prime(selector?: string): Promise<string>;
-  confirmPriming(): Promise<string>;
   policy(): Promise<string>;
   reset(scope: string): Promise<string>;
   verify(): Promise<string>;
@@ -64,7 +63,6 @@ export function registerQuotaRouterCommands(
               ctx.ui.notify("Priming cancelled; no quota was spent.", "warning");
               return;
             }
-            await operations.confirmPriming();
             result = await operations.prime(parsed.args[0]);
             break;
           }
@@ -109,7 +107,7 @@ export function formatQuotaRouterDashboard(status: string): string {
     "◆ /quota-router status                        Show current routing status",
     "◆ /quota-router use auto                      Enable quota-aware automatic routing",
     "◆ /quota-router refresh [account|all]         Refresh credentials and quota",
-    "◆ /quota-router prime [account|all]           Confirm and initialize untouched accounts",
+    "◆ /quota-router prime [account|all]           Send one confirmed minimal primer request",
     "",
     "MORE COMMANDS",
     "· /quota-router use <account>                 Force a managed account",

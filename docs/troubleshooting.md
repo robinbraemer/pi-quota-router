@@ -23,12 +23,14 @@ Start with:
 | Footer still shows `none · login` after successful login | Run `/quota-router list` to confirm the account, then `/quota-router status`. Current versions rerender immediately; update the Git package if the stale footer persists. |
 | `no_eligible_accounts` | Refresh usage, inspect policy/headroom, prime confirmed untouched accounts, or wait for cooldowns. A fresh non-exhausted result clears an estimated block. A deliberate `/quota-router use <account>` can bypass automatic headroom. |
 | `manual_account_unavailable` | Reauthenticate/clear the account's block, wait for its reservation, or run `/quota-router use auto`. |
-| `not_authorized` from prime | Invoke `/quota-router prime ...` interactively and accept both confirmations. |
+| `not_authorized` from prime | Invoke `/quota-router prime ...` interactively and accept both confirmations. Authorization applies only to that invocation. |
 | `not_candidate` from prime | The account is already confirmed, is not untouched, or is inside the one-hour primer retry cooldown. |
 | `reserved` from prime | Another foreground/primer request owns the account or another process owns the singleton sweep. Wait for active work to finish; a crashed owner's lease expires within two minutes. |
 | `busy` from prime | Foreground agent work is active. Wait until Pi settles. |
 | `inconclusive` from prime | No weekly reset appeared after the minimal request. Wait one hour; do not assume the rolling-window behavior. |
 | `failed` from prime | The minimal provider request failed. Check connectivity/authentication, then retry after one hour. |
+
+`/quota-router prime all` is still one-shot: it sends at most one minimal request and stops after the forced quota refresh. It never enables later background priming.
 
 ## Typed errors
 
@@ -73,7 +75,7 @@ All normal Codex model ids should appear. The release smoke test installs an exa
 
 - `reset cooldowns` removes error blocks; use it only after the underlying quota/auth condition changed.
 - `reset reservations` removes leases; ensure no other Pi process is using the profile.
-- `reset priming` forgets confirmed primer results/retry clocks but does not disable the two config confirmation booleans.
+- `reset priming` forgets observed primer results and retry clocks. One-shot command confirmations are ephemeral and are never stored.
 - `reset all` combines those non-credential resets. It never removes `accounts.json`.
 
 Diagnostic events are redacted and bounded, but still avoid sharing the log without review. Toggle them with `/quota-router log off` and find them with `/quota-router path`.

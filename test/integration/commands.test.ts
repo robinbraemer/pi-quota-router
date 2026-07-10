@@ -28,7 +28,6 @@ describe("/quota-router commands", () => {
         "verify",
         "paths",
         "log",
-        "confirmPriming",
       ].map((name) => [
         name,
         async (...args: unknown[]) => {
@@ -77,7 +76,6 @@ describe("/quota-router commands", () => {
       "status:",
       "use:auto",
       "refresh:all",
-      "confirmPriming:",
       "prime:all",
       "policy:",
       "reset:all",
@@ -101,7 +99,6 @@ describe("/quota-router commands", () => {
         primes += 1;
         return "primed";
       },
-      confirmPriming: async () => "confirmed",
     } as unknown as QuotaRouterOperations;
     let confirmations = 0;
     const ctx = {
@@ -120,6 +117,38 @@ describe("/quota-router commands", () => {
     await handler("prime all", ctx);
     expect(confirmations).toBe(2);
     expect(primes).toBe(0);
+  });
+
+  test("authorizes only the current one-shot prime command", async () => {
+    let handler: ((args: string, ctx: ExtensionCommandContext) => Promise<void>) | undefined;
+    const calls: string[] = [];
+    const pi = {
+      registerCommand: (_name: string, options: { handler: typeof handler }) => {
+        handler = options.handler;
+      },
+    } as unknown as ExtensionAPI;
+    const operations = {
+      prime: async (selector?: string) => {
+        calls.push(`prime:${selector ?? ""}`);
+        return "work: confirmed";
+      },
+      confirmPriming: async () => {
+        calls.push("persistent-confirmation");
+        return "enabled";
+      },
+    } as unknown as QuotaRouterOperations;
+    const ctx = {
+      ui: {
+        notify: () => undefined,
+        confirm: async () => true,
+      },
+    } as unknown as ExtensionCommandContext;
+    registerQuotaRouterCommands(pi, operations);
+    if (!handler) throw new Error("command was not registered");
+
+    await handler("prime work", ctx);
+
+    expect(calls).toEqual(["prime:work"]);
   });
 
   test("rerenders the footer immediately after a successful login", async () => {

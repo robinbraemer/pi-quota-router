@@ -97,6 +97,23 @@ describe("PrimingController", () => {
     expect(requests).toHaveLength(0);
   });
 
+  test("allows one explicitly authorized attempt without enabling background sweeps", async () => {
+    const { controller, requests } = await setup({
+      refreshed: untouched(NOW + 604_800_000),
+    });
+
+    expect(await controller.primeAccount("a", { authorization: "one-shot" })).toEqual({
+      status: "confirmed",
+      resetAt: NOW + 604_800_000,
+    });
+    expect(requests).toHaveLength(1);
+
+    controller.scheduleSweep("idle");
+    await Bun.sleep(10);
+    await controller.shutdown();
+    expect(requests).toHaveLength(1);
+  });
+
   test("sends the minimal isolated request and confirms only an observed reset", async () => {
     const { controller, store, requests } = await setup({
       authorized: true,

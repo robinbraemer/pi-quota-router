@@ -381,20 +381,17 @@ export async function createRouterController(
       }
       const results = [];
       for (const account of selected) {
-        results.push(`${account.label}: ${(await priming.primeAccount(account.id)).status}`);
+        const result = await priming.primeAccount(account.id, { authorization: "one-shot" });
+        results.push(`${account.label}: ${result.status}`);
+        if (
+          result.status === "confirmed" ||
+          result.status === "inconclusive" ||
+          result.status === "failed"
+        ) {
+          break;
+        }
       }
       return results.join("\n");
-    },
-    async confirmPriming() {
-      cachedConfig = await configStore.update((config) => ({
-        ...config,
-        priming: {
-          ...config.priming,
-          enabled: true,
-          confirmedFirstUseRollingWindow: true,
-        },
-      }));
-      return "Synthetic priming is explicitly enabled for confirmed rolling windows.";
     },
     async policy() {
       cachedConfig = await configStore.read();

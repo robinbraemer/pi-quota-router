@@ -2,7 +2,7 @@
 
 Pi Quota Router is a normal-Pi extension for several equivalent ChatGPT Codex accounts. It keeps the selected `openai-codex` model and thinking level unchanged, but chooses the account whose useful weekly quota is most urgent to spend.
 
-It refreshes 5-hour and weekly usage before selection, reserves accounts across concurrent Pi processes, refreshes OAuth tokens under a cross-process lock, and can fail over only before model-visible output. Optional priming can start an untouched account's weekly reset clock, but only after two explicit confirmations.
+It refreshes 5-hour and weekly usage before selection, reserves accounts across concurrent Pi processes, refreshes OAuth tokens under a cross-process lock, and can fail over only before model-visible output. Optional one-shot priming can start an untouched account's weekly reset clock, but only after two explicit confirmations for that invocation.
 
 ## Install from GitHub
 
@@ -83,9 +83,9 @@ Pi asks for two separate confirmations:
 1. Confirm that a minimal request may spend quota.
 2. Confirm that first-use rolling-window behavior is known.
 
-After both confirmations, the router sends `.` with no history, no tools, the current model, the lowest reasoning level, and `maxTokens: 1`. It force-refreshes usage and marks the account primed only after observing a weekly reset timestamp. A failed or inconclusive attempt waits one hour before retrying.
+After both confirmations, the router sends exactly one `.` request with no history, no tools, the current model, the lowest reasoning level, and `maxTokens: 1`. It force-refreshes usage, observes the resulting quota state, marks the account primed only after seeing a weekly reset timestamp, and then stops. A failed or inconclusive attempt waits one hour before another explicit retry.
 
-Confirmed automatic priming is off by default. Once enabled, idle sweeps process at most one untouched account at a time; later idle periods continue the remaining accounts. Foreground work pauses or aborts primer activity. Once a clock is observed, the account enters normal urgency routing.
+The confirmations authorize only the current command. They do not change `config.json`, enable idle sweeps, or authorize future background priming. `/quota-router prime all` scans for the first eligible untouched account but still sends at most one provider request; run the command again and reconfirm to prime another account. Persistent automatic priming remains disabled unless a separate explicit action is introduced and confirmed. Once a clock is observed, the account enters normal urgency routing.
 
 ## Commands
 
@@ -100,11 +100,11 @@ Confirmed automatic priming is off by default. Once enabled, idle sweeps process
 | `/quota-router use <account-or-label>` | Force a specific account, including below automatic headroom floors. |
 | `/quota-router use auto` | Return to quota-aware automatic routing. |
 | `/quota-router refresh [account-or-all]` | Refresh OAuth if needed and force fresh quota usage, reconciling estimated cooldowns. |
-| `/quota-router prime [account-or-all]` | Ask for both confirmations, then prime untouched accounts. |
+| `/quota-router prime [account-or-all]` | Ask for both confirmations, send at most one minimal primer request, refresh quota, then stop. |
 | `/quota-router policy` | Print the active JSON policy. |
 | `/quota-router reset cooldowns` | Clear persisted quota/auth cooldowns. |
 | `/quota-router reset reservations` | Clear persisted request leases. Use only when no peer Pi process is active. |
-| `/quota-router reset priming` | Clear priming confirmations and retry times. |
+| `/quota-router reset priming` | Clear observed primer results and retry times. |
 | `/quota-router reset all` | Clear all non-credential runtime state. |
 | `/quota-router verify` | Validate router files and report the managed account count. |
 | `/quota-router path` | Print every router data path. |

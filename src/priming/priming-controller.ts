@@ -42,7 +42,7 @@ export interface PrimingControllerOptions {
 }
 
 export interface PrimingController {
-  primeAccount(accountId: string): Promise<PrimerResult>;
+  primeAccount(accountId: string, options?: { authorization: "one-shot" }): Promise<PrimerResult>;
   setForegroundActive(active: boolean): void;
   scheduleSweep(reason: "startup" | "manual" | "idle"): void;
   shutdown(): Promise<void>;
@@ -57,9 +57,12 @@ export function createPrimingController(options: PrimingControllerOptions): Prim
   let activeAbort: AbortController | undefined;
   let background: Promise<void> | undefined;
 
-  const primeAccount = async (accountId: string): Promise<PrimerResult> => {
+  const primeAccount = async (
+    accountId: string,
+    invocation?: { authorization: "one-shot" },
+  ): Promise<PrimerResult> => {
     const config = options.config();
-    if (!isPrimingAuthorized(config)) {
+    if (!isPrimingAuthorized(config) && invocation?.authorization !== "one-shot") {
       return { status: "not_authorized" };
     }
     if (foregroundActive) {
