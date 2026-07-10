@@ -29,6 +29,8 @@ describe("RouterController", () => {
     await expect(controller.assertReady()).rejects.toThrow("/quota-router login");
     await controller.vault.addFromOAuth("work", makeCredentials("account-1", 3_000_000_000_000));
     await controller.assertReady();
+    expect(await controller.operations.accounts()).toContain("work");
+    expect(await controller.operations.use("auto")).toContain("automatic");
 
     const model = Object.values(OPENAI_CODEX_MODELS)[0] as Model<"openai-codex-responses">;
     const events: AssistantMessageEvent[] = [];
@@ -38,6 +40,9 @@ describe("RouterController", () => {
     expect(events.at(-1)?.type).toBe("done");
     expect(backendKey).not.toBe("pending-login");
     expect(backendKey).toContain(".");
+    expect(await controller.operations.status()).toContain("work");
+    expect(await controller.operations.verify()).toContain("healthy");
+    expect(await controller.operations.paths()).toContain("accounts.json");
     await controller.shutdown();
   });
 });

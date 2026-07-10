@@ -9,7 +9,10 @@ import type {
 import { OPENAI_CODEX_MODELS } from "@earendil-works/pi-ai/providers/openai-codex.models";
 import type { AccountVault, CodexOAuthClient } from "./accounts/account-vault.ts";
 import { createAccountVault } from "./accounts/account-vault.ts";
+import type { QuotaRouterOperations } from "./commands/commands.ts";
+import { performCodexLogin } from "./commands/login.ts";
 import { defaultConfig } from "./config.ts";
+import { createEventLog } from "./logging/event-log.ts";
 import { createPrimingController } from "./priming/priming-controller.ts";
 import type { ProviderController } from "./provider.ts";
 import { classifyFailure, type FailureClass } from "./recovery/failure-classifier.ts";
@@ -17,6 +20,8 @@ import { blockFromFailure } from "./recovery/recovery-state.ts";
 import { waitForRecovery } from "./recovery/wait-for-recovery.ts";
 import { createReservationStore } from "./routing/reservation-store.ts";
 import { selectAndReserve } from "./routing/select-and-reserve.ts";
+import { weeklyUrgency } from "./routing/selection-policy.ts";
+import { formatCompactStatus } from "./status/status-controller.ts";
 import { createAtomicJsonStore } from "./storage/atomic-json-store.ts";
 import type { RouterPaths } from "./storage/paths.ts";
 import {
@@ -34,6 +39,7 @@ import { createUsageService } from "./usage/usage-service.ts";
 
 export interface RouterController extends ProviderController {
   vault: AccountVault;
+  operations: QuotaRouterOperations;
   assertReady(): Promise<void>;
   setForegroundActive(active: boolean): void;
   schedulePriming(): void;
@@ -75,6 +81,7 @@ export async function createRouterController(
     refreshLockDirectory: options.paths.directory,
   });
   const reservations = createReservationStore(stateStore);
+  const eventLog = createEventLog({ path: options.paths.log });
   const usage = createUsageService({
     clock,
     fetchUsage: async (accountId, signal) => {
@@ -90,7 +97,9 @@ export async function createRouterController(
     },
   });
   let currentAccountId: string | undefined;
+  let currentLabel = "none";
   let currentModelId = Object.keys(OPENAI_CODEX_MODELS)[0] ?? "";
+  let loggingEnabled = true;
 
   const priming = createPrimingController({
     config: () => cachedConfig,
@@ -184,6 +193,16 @@ export async function createRouterController(
       });
       if (selected.reservation) {
         currentAccountId = selected.reservation.accountId;
+        currentLabel =
+          summaries.find((account) => account.id === currentAccountId)?.label ?? currentAccountId;
+        if (loggingEnabled) {
+          await eventLog.append({
+            type: "account_selected",
+            at: clock(),
+            accountId: currentAccountId,
+            detail: { reason: selected.decision.reason },
+          });
+        }
         return selected.reservation;
       }
       return undefined;
@@ -202,6 +221,14 @@ export async function createRouterController(
           blockFromFailure(accountId, failure, usage.peek(accountId), clock()),
         ],
       }));
+      if (loggingEnabled) {
+        await eventLog.append({
+          type: failure.kind === "auth-invalid" ? "auth_invalidated" : "quota_blocked",
+          at: clock(),
+          accountId,
+          detail: { failure: failure.kind },
+        });
+      }
       usage.invalidate(accountId);
     },
     release: (leaseToken) => reservations.release(leaseToken).then(() => undefined),
@@ -214,10 +241,145 @@ export async function createRouterController(
     maxAttempts: defaultConfig.maxRotationAttempts,
   });
 
+  const statusText = async (): Promise<string> => {
+    const config = await configStore.read();
+    cachedConfig = config;
+    const snapshot = currentAccountId ? usage.peek(currentAccountId) : undefined;
+    return formatCompactStatus({
+      label: currentLabel,
+      ...(snapshot ? { snapshot } : {}),
+      ...(snapshot ? { urgency: weeklyUrgency(snapshot, clock()) } : {}),
+      mode: config.manualAccountId ? "manual" : currentAccountId ? "auto" : "login",
+      now: clock(),
+    });
+  };
+
+  const resolveAccount = async (selector: string) => {
+    const accounts = await vault.list();
+    return accounts.find((account) => account.id === selector || account.label === selector);
+  };
+
+  const operations: QuotaRouterOperations = {
+    dashboard: statusText,
+    status: statusText,
+    async accounts() {
+      const accounts = await vault.list();
+      return accounts.length === 0
+        ? "No managed Codex accounts. Run /quota-router login."
+        : accounts
+            .map(
+              (account) =>
+                `${account.id} · ${account.label} · ${account.needsReauth ? "reauth required" : "ready"}`,
+            )
+            .join("\n");
+    },
+    login: (label, ctx) => performCodexLogin({ ctx, ...(label ? { label } : {}), vault }),
+    async use(selector) {
+      if (selector === "auto") {
+        cachedConfig = await configStore.update((config) => {
+          const { manualAccountId: _manual, ...automatic } = config;
+          return automatic;
+        });
+        return "Routing returned to automatic quota-aware selection.";
+      }
+      const account = await resolveAccount(selector);
+      if (!account) {
+        throw new Error(`Unknown Codex account: ${selector}`);
+      }
+      cachedConfig = await configStore.update((config) => ({
+        ...config,
+        manualAccountId: account.id,
+      }));
+      return `Manual routing set to ${account.label} (${account.id}).`;
+    },
+    async refresh(selector = "all") {
+      const accounts = await vault.list();
+      const selected =
+        selector === "all"
+          ? accounts
+          : accounts.filter((account) => account.id === selector || account.label === selector);
+      if (selected.length === 0) {
+        throw new Error(`No Codex account matches ${selector}`);
+      }
+      for (const account of selected) {
+        await vault.getFreshCredential(account.id);
+        await usage.get(account.id, { force: true });
+      }
+      return `Refreshed ${selected.length} Codex account${selected.length === 1 ? "" : "s"}.`;
+    },
+    async prime(selector = "all") {
+      const accounts = await vault.list();
+      const selected =
+        selector === "all"
+          ? accounts
+          : accounts.filter((account) => account.id === selector || account.label === selector);
+      if (selected.length === 0) {
+        throw new Error(`No Codex account matches ${selector}`);
+      }
+      const results = [];
+      for (const account of selected) {
+        results.push(`${account.label}: ${(await priming.primeAccount(account.id)).status}`);
+      }
+      return results.join("\n");
+    },
+    async confirmPriming() {
+      cachedConfig = await configStore.update((config) => ({
+        ...config,
+        priming: {
+          ...config.priming,
+          enabled: true,
+          confirmedFirstUseRollingWindow: true,
+        },
+      }));
+      return "Synthetic priming is explicitly enabled for confirmed rolling windows.";
+    },
+    async policy() {
+      cachedConfig = await configStore.read();
+      return JSON.stringify(cachedConfig, null, 2);
+    },
+    async reset(scope) {
+      await stateStore.update((state) => ({
+        ...state,
+        blocks: scope === "cooldowns" || scope === "all" ? [] : state.blocks,
+        reservations: scope === "reservations" || scope === "all" ? [] : state.reservations,
+        priming:
+          scope === "priming" || scope === "all"
+            ? structuredClone(defaultRuntimeState.priming)
+            : state.priming,
+      }));
+      return `Reset quota-router ${scope} state.`;
+    },
+    async verify() {
+      const [vaultStatus, configStatus, stateStatus, accounts] = await Promise.all([
+        vaultStore.inspect(),
+        configStore.inspect(),
+        stateStore.inspect(),
+        vault.list(),
+      ]);
+      const healthy =
+        vaultStatus.valid && configStatus.valid && stateStatus.valid ? "healthy" : "invalid";
+      return `Quota router is ${healthy}; ${accounts.length} account(s); files mode 0600.`;
+    },
+    async paths() {
+      return [
+        `accounts: ${options.paths.accounts}`,
+        `config: ${options.paths.config}`,
+        `state: ${options.paths.state}`,
+        `log: ${options.paths.log}`,
+      ].join("\n");
+    },
+    async log(mode) {
+      if (mode === "on") loggingEnabled = true;
+      if (mode === "off") loggingEnabled = false;
+      return `Diagnostic logging is ${loggingEnabled ? "on" : "off"}; ${options.paths.log}`;
+    },
+  };
+
   return {
     bootstrapApiKey: "pending-login",
     routedStream,
     vault,
+    operations,
     async assertReady() {
       if ((await vault.list()).length === 0) {
         throw new Error("Run /quota-router login before using Codex");

@@ -11,6 +11,7 @@ describe("extension lifecycle", () => {
     let shutdown = 0;
     const pi = {
       registerProvider: () => undefined,
+      registerCommand: () => undefined,
       on: (name: string, handler: (...args: never[]) => unknown) => handlers.set(name, handler),
     } as unknown as ExtensionAPI;
     const controller = {
@@ -27,12 +28,18 @@ describe("extension lifecycle", () => {
       shutdown: async () => {
         shutdown += 1;
       },
+      operations: {
+        status: async () => "Codex · none · login",
+      },
     } as unknown as RouterController;
     await createExtension(async () => controller)(pi);
 
-    await handlers.get("agent_start")?.();
-    await handlers.get("agent_settled")?.();
-    await handlers.get("session_shutdown")?.();
+    const ctx = {
+      ui: { setStatus: () => undefined },
+    };
+    await handlers.get("agent_start")?.({} as never, ctx as never);
+    await handlers.get("agent_settled")?.({} as never, ctx as never);
+    await handlers.get("session_shutdown")?.({} as never, ctx as never);
     expect(foreground).toEqual([true, false]);
     expect(priming).toBe(1);
     expect(shutdown).toBe(1);
