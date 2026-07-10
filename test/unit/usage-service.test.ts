@@ -206,6 +206,42 @@ describe("UsageService", () => {
     expect(calls).toBe(2);
   });
 
+  test("lets each caller abort independently while a shared fetch continues", async () => {
+    let releaseFetch: (() => void) | undefined;
+    let upstreamSignal: AbortSignal | undefined;
+    let calls = 0;
+    const service = createUsageService({
+      clock: () => 1_000_000,
+      jitterMs: () => 0,
+      fetchUsage: async (accountId, signal) => {
+        calls += 1;
+        upstreamSignal = signal;
+        await new Promise<void>((resolve, reject) => {
+          releaseFetch = resolve;
+          signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+        });
+        return snapshot(accountId, 1_000_000);
+      },
+    });
+    const cancellation = new AbortController();
+    const reason = new Error("cancelled caller");
+
+    const cancelled = service.get("a", { signal: cancellation.signal });
+    await Bun.sleep(0);
+    const active = service.get("a");
+    const activeResult = active.then(
+      (value) => value,
+      (error) => error,
+    );
+    cancellation.abort(reason);
+
+    await expect(cancelled).rejects.toBe(reason);
+    expect(upstreamSignal).toBeUndefined();
+    releaseFetch?.();
+    expect(await activeResult).toEqual(snapshot("a", 1_000_000));
+    expect(calls).toBe(1);
+  });
+
   test("allows at most two upstream usage requests concurrently", async () => {
     let active = 0;
     let maximum = 0;
@@ -247,6 +283,25 @@ describe("UsageService", () => {
     expect(newcomerAcquired).toBe(false);
     (await waiting)();
     (await newcomer)();
+  });
+
+  test("rejects an already-aborted waiter before queueing it", async () => {
+    const gate = createConcurrencyGate(1);
+    const release = await gate.acquire();
+    const cancellation = new AbortController();
+    const reason = new Error("already cancelled");
+    cancellation.abort(reason);
+
+    const outcome = await Promise.race([
+      gate.acquire(cancellation.signal).then(
+        () => "acquired",
+        (error) => error,
+      ),
+      Bun.sleep(10).then(() => "still waiting"),
+    ]);
+
+    expect(outcome).toBe(reason);
+    release();
   });
 
   test("uses the current configured freshness threshold", async () => {

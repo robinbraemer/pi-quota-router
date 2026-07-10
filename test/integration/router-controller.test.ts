@@ -722,6 +722,58 @@ describe("RouterController", () => {
     await controller.shutdown();
   });
 
+  test("rejects ambiguous labels for use, refresh, and one-shot prime", async () => {
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    let usageCalls = 0;
+    let primerCalls = 0;
+    const controller = await createRouterController({
+      paths: resolveRouterPaths(fixture.directory),
+      clock: () => 2_000_000_000_000,
+      oauth: { refresh: async () => makeCredentials("account-1", 3_000_000_000_000) },
+      fetchImpl: async () => {
+        usageCalls += 1;
+        return Response.json(completeUsageResponse);
+      },
+      baseStream: () => {
+        primerCalls += 1;
+        return eventStream(successfulText());
+      },
+    });
+    await controller.vault.addFromOAuth(
+      "duplicate",
+      makeCredentials("account-1", 3_000_000_000_000),
+    );
+    await controller.vault.addFromOAuth(
+      "duplicate",
+      makeCredentials("account-2", 3_000_000_000_000),
+    );
+
+    const outcomes: string[] = [];
+    for (const operation of [
+      () => controller.operations.use("duplicate"),
+      () => controller.operations.refresh("duplicate"),
+      () => controller.operations.prime("duplicate"),
+    ]) {
+      try {
+        await operation();
+        outcomes.push("resolved");
+      } catch (error) {
+        outcomes.push(error instanceof Error ? error.message : String(error));
+      }
+    }
+
+    expect(outcomes).toEqual(
+      Array.from(
+        { length: 3 },
+        () => 'Multiple Codex accounts are labeled "duplicate"; use a managed account ID.',
+      ),
+    );
+    expect(usageCalls).toBe(0);
+    expect(primerCalls).toBe(0);
+    await controller.shutdown();
+  });
+
   test("uses the configured maximum recovery wait", async () => {
     const fixture = await createStorageFixture();
     cleanups.push(fixture.cleanup);

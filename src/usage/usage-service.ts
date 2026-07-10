@@ -46,11 +46,11 @@ export function createUsageService(options: UsageServiceOptions): UsageService {
   const forcedFollowups = new Map<string, ForcedFollowup>();
   const gate = createConcurrencyGate(options.maxConcurrent ?? DEFAULT_MAX_CONCURRENT);
 
-  const startRequest = (accountId: string, signal?: AbortSignal): Promise<UsageSnapshot> => {
+  const startRequest = (accountId: string): Promise<UsageSnapshot> => {
     const request = (async () => {
-      const release = await gate.acquire(signal);
+      const release = await gate.acquire();
       try {
-        const fresh = await options.fetchUsage(accountId, signal);
+        const fresh = await options.fetchUsage(accountId);
         const normalized = fresh.stale ? { ...fresh, stale: false } : fresh;
         cache.set(accountId, normalized);
         return normalized;
@@ -85,6 +85,7 @@ export function createUsageService(options: UsageServiceOptions): UsageService {
     },
 
     async get(accountId, getOptions = {}) {
+      getOptions.signal?.throwIfAborted();
       const cached = cache.get(accountId);
       const now = clock();
       if (
@@ -124,7 +125,7 @@ export function createUsageService(options: UsageServiceOptions): UsageService {
         return raceWithSignal(followup.promise, getOptions.signal);
       }
 
-      return startRequest(accountId, getOptions.signal);
+      return raceWithSignal(startRequest(accountId), getOptions.signal);
     },
 
     peek(accountId) {
@@ -143,6 +144,7 @@ export function createConcurrencyGate(maximum: number) {
 
   return {
     async acquire(signal?: AbortSignal): Promise<() => void> {
+      signal?.throwIfAborted();
       let inheritedSlot = false;
       if (active >= maximum) {
         await new Promise<void>((resolve, reject) => {
