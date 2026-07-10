@@ -59,6 +59,7 @@ export async function selectAndReserve(input: {
           (value) => value.accountId === explanation.accountId,
         );
         return (
+          (explanation.eligible && input.excludedAccountIds?.has(explanation.accountId)) ||
           (explanation.rejectionCode === "blocked" &&
             candidate?.block?.retryAt !== undefined &&
             candidate.block.retryAt > input.now) ||

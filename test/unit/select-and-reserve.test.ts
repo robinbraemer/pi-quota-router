@@ -121,6 +121,40 @@ describe("selectAndReserve", () => {
     expect(result.decision.candidates).toEqual([]);
   });
 
+  test("recovers excluded accounts after their cooldown elapses", async () => {
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    const store = createAtomicJsonStore<RuntimeStateFile>({
+      path: fixture.file,
+      schema: RuntimeStateFileSchema,
+      createDefault: () => structuredClone(defaultRuntimeState),
+    });
+    await store.update((state) => ({
+      ...state,
+      blocks: [
+        {
+          accountId: "a",
+          kind: "transient",
+          blockedAt: NOW - 2000,
+          retryAt: NOW - 1000,
+          estimated: false,
+        },
+      ],
+    }));
+
+    const result = await selectAndReserve({
+      stateStore: store,
+      request: { candidates: [candidate("a", NOW)], config: defaultConfig, now: NOW },
+      excludedAccountIds: new Set(["a"]),
+      owner: { processId: 1, sessionId: "s", requestId: "r" },
+      now: NOW,
+    });
+
+    expect(result.reservation).toBeUndefined();
+    expect(result.recoverableAccountIds).toEqual(["a"]);
+    expect(result.decision.candidates).toEqual([]);
+  });
+
   test("does not recover blocked accounts when routing is disabled", async () => {
     const fixture = await createStorageFixture();
     cleanups.push(fixture.cleanup);
