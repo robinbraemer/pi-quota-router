@@ -48,6 +48,8 @@ jobs:
         run: git config --global url."https://x-access-token:${GITHUB_TOKEN}@github.com/".insteadOf "git@github.com:"
 
       - name: Smoke-test Pi's GitHub install path
+        env:
+          PI_QUOTA_ROUTER_GIT_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
         run: bun run smoke:install
 
       - name: Check package contents

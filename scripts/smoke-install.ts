@@ -12,7 +12,9 @@ const agentDirectory = join(root, "agent");
 const project = join(root, "project");
 
 try {
-  const revision = (await run(["git", "rev-parse", "HEAD"], repository)).trim();
+  const revision = (
+    await run(["git", "rev-parse", process.env.PI_QUOTA_ROUTER_GIT_REVISION ?? "HEAD"], repository)
+  ).trim();
   const remoteRefs = await run(["git", "ls-remote", "origin"], repository);
   if (!remoteRefs.includes(revision)) {
     throw new Error(
