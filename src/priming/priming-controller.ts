@@ -1,0 +1,229 @@
+import { randomUUID } from "node:crypto";
+import { isPrimingAuthorized } from "../config.ts";
+import type { ReservationStore } from "../routing/reservation-store.ts";
+import type { AtomicJsonStore } from "../storage/atomic-json-store.ts";
+import type { RuntimeStateFile } from "../storage/schemas.ts";
+import type { Reservation, ReservationOwner, RouterConfig, UsageSnapshot } from "../types.ts";
+
+export interface PrimerRequest {
+  accountId: string;
+  modelId: string;
+  prompt: ".";
+  messages: [];
+  tools: [];
+  reasoning: string;
+  maxTokens: 1;
+}
+
+export type PrimerResult =
+  | { status: "not_authorized" }
+  | { status: "busy" }
+  | { status: "not_candidate" }
+  | { status: "reserved" }
+  | { status: "inconclusive" }
+  | { status: "failed" }
+  | { status: "confirmed"; resetAt: number };
+
+export interface PrimingControllerOptions {
+  config: () => RouterConfig;
+  stateStore: AtomicJsonStore<RuntimeStateFile>;
+  reservations: ReservationStore;
+  usage: {
+    get(accountId: string, options: { force: true; signal?: AbortSignal }): Promise<UsageSnapshot>;
+  };
+  listAccountIds: () => Promise<string[]>;
+  executePrimer: (request: PrimerRequest, signal: AbortSignal) => Promise<void>;
+  clock: () => number;
+  owner: ReservationOwner;
+  currentModelId: () => string;
+  lowestReasoning: () => string;
+}
+
+export interface PrimingController {
+  primeAccount(accountId: string): Promise<PrimerResult>;
+  setForegroundActive(active: boolean): void;
+  scheduleSweep(reason: "startup" | "manual" | "idle"): void;
+  shutdown(): Promise<void>;
+}
+
+export function createPrimingController(options: PrimingControllerOptions): PrimingController {
+  let foregroundActive = false;
+  let activeAbort: AbortController | undefined;
+  let background: Promise<void> | undefined;
+
+  const primeAccount = async (accountId: string): Promise<PrimerResult> => {
+    const config = options.config();
+    if (!isPrimingAuthorized(config)) {
+      return { status: "not_authorized" };
+    }
+    if (foregroundActive) {
+      return { status: "busy" };
+    }
+
+    const now = options.clock();
+    const state = await options.stateStore.read();
+    if (
+      state.priming.confirmedAccountIds.includes(accountId) ||
+      (state.priming.retryAfter[accountId] ?? 0) > now
+    ) {
+      return { status: "not_candidate" };
+    }
+
+    const sweep = await options.reservations.acquirePrimerSweep(
+      options.owner,
+      now,
+      config.reservationTtlMs,
+    );
+    if (!sweep) {
+      return { status: "reserved" };
+    }
+
+    let accountLease: Reservation | undefined;
+    const controller = new AbortController();
+    activeAbort = controller;
+    try {
+      accountLease = await reservePrimerAccount(options, accountId, now, config.reservationTtlMs);
+      if (!accountLease) {
+        return { status: "reserved" };
+      }
+      const before = await options.usage.get(accountId, {
+        force: true,
+        signal: controller.signal,
+      });
+      if (!isUntouchedCandidate(before)) {
+        return { status: "not_candidate" };
+      }
+
+      await options.executePrimer(
+        {
+          accountId,
+          modelId: options.currentModelId(),
+          prompt: ".",
+          messages: [],
+          tools: [],
+          reasoning: options.lowestReasoning(),
+          maxTokens: 1,
+        },
+        controller.signal,
+      );
+      const after = await options.usage.get(accountId, {
+        force: true,
+        signal: controller.signal,
+      });
+      const resetAt = after.weeklyWindow?.resetsAt;
+      if (resetAt !== undefined) {
+        await options.stateStore.update((current) => {
+          const retryAfter = { ...current.priming.retryAfter };
+          delete retryAfter[accountId];
+          return {
+            ...current,
+            priming: {
+              confirmedAccountIds: Array.from(
+                new Set([...current.priming.confirmedAccountIds, accountId]),
+              ),
+              retryAfter,
+            },
+          };
+        });
+        return { status: "confirmed", resetAt };
+      }
+
+      await applyRetryCooldown(options, accountId, now, config.priming.retryCooldownMs);
+      return { status: "inconclusive" };
+    } catch (_error) {
+      if (controller.signal.aborted) {
+        throw controller.signal.reason;
+      }
+      await applyRetryCooldown(options, accountId, now, config.priming.retryCooldownMs);
+      return { status: "failed" };
+    } finally {
+      activeAbort = undefined;
+      if (accountLease) {
+        await options.reservations.release(accountLease.leaseToken);
+      }
+      await options.reservations.release(sweep.leaseToken);
+    }
+  };
+
+  return {
+    primeAccount,
+
+    setForegroundActive(active) {
+      foregroundActive = active;
+      if (active) {
+        activeAbort?.abort(new Error("Foreground request started"));
+      }
+    },
+
+    scheduleSweep(_reason) {
+      if (foregroundActive || background || !isPrimingAuthorized(options.config())) {
+        return;
+      }
+      background = (async () => {
+        const ids = await options.listAccountIds();
+        for (const accountId of ids.slice(0, options.config().priming.maximumPerSweep)) {
+          if (foregroundActive) {
+            break;
+          }
+          await primeAccount(accountId);
+        }
+      })().finally(() => {
+        background = undefined;
+      });
+    },
+
+    async shutdown() {
+      activeAbort?.abort(new Error("Pi session is shutting down"));
+      await background?.catch(() => undefined);
+    },
+  };
+}
+
+function isUntouchedCandidate(snapshot: UsageSnapshot): boolean {
+  return (
+    !snapshot.stale &&
+    snapshot.shortWindow.usedPercent === 0 &&
+    snapshot.weeklyWindow?.usedPercent === 0 &&
+    snapshot.weeklyWindow.resetsAt === undefined
+  );
+}
+
+async function reservePrimerAccount(
+  options: PrimingControllerOptions,
+  accountId: string,
+  now: number,
+  ttlMs: number,
+): Promise<Reservation | undefined> {
+  let acquired: Reservation | undefined;
+  await options.stateStore.update((state) => {
+    const reservations = state.reservations.filter((value) => value.expiresAt > now);
+    if (reservations.some((value) => value.accountId === accountId)) {
+      return { ...state, reservations };
+    }
+    acquired = {
+      accountId,
+      leaseToken: randomUUID(),
+      owner: options.owner,
+      createdAt: now,
+      expiresAt: now + ttlMs,
+      kind: "primer",
+    };
+    return { ...state, reservations: [...reservations, acquired] };
+  });
+  return acquired;
+}
+
+async function applyRetryCooldown(
+  options: PrimingControllerOptions,
+  accountId: string,
+  now: number,
+  cooldownMs: number,
+): Promise<void> {
+  await options.stateStore.update((state) => ({
+    ...state,
+    priming: {
+      ...state.priming,
+      retryAfter: { ...state.priming.retryAfter, [accountId]: now + cooldownMs },
+    },
+  }));
+}
