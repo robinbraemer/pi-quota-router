@@ -40,7 +40,7 @@ export interface UsageSnapshot {
   accountId: string;
   observedAt: number;
   shortWindow: UsageWindow;
-  weeklyWindow: UsageWindow;
+  weeklyWindow?: UsageWindow;
   stale: boolean;
   planType?: string;
   creditsRemaining?: number;

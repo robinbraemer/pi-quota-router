@@ -33,7 +33,7 @@ const UsageSnapshotSchema = z
     accountId: z.string().min(1),
     observedAt: z.number().int().nonnegative(),
     shortWindow: UsageWindowSchema,
-    weeklyWindow: UsageWindowSchema,
+    weeklyWindow: UsageWindowSchema.optional(),
     stale: z.boolean(),
     planType: z.string().optional(),
     creditsRemaining: z.number().nonnegative().optional(),
