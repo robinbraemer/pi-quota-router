@@ -49,7 +49,7 @@ export function reconcileUsageBlock(
   usage: UsageSnapshot,
   now: number,
 ): AccountBlock | undefined {
-  if (!block.estimated || block.retryAt === undefined) {
+  if (block.kind !== "quota" || !block.estimated || block.retryAt === undefined) {
     return block;
   }
   const observedReset = latestExhaustedReset(usage, now);
