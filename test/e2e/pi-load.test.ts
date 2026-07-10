@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { fileURLToPath } from "node:url";
 import { OPENAI_CODEX_MODELS } from "@earendil-works/pi-ai/providers/openai-codex.models";
 import { createIsolatedPiHome } from "../helpers/isolated-home.ts";
 
@@ -10,7 +11,8 @@ describe("normal Pi extension load", () => {
   test("loads from the package entry and preserves every Codex model", async () => {
     const home = await createIsolatedPiHome();
     cleanups.push(home.cleanup);
-    const process = Bun.spawn(["pi", "-e", "./src/index.ts", "--list-models", "openai-codex"], {
+    const pi = fileURLToPath(new URL("../../node_modules/.bin/pi", import.meta.url));
+    const process = Bun.spawn([pi, "-e", "./src/index.ts", "--list-models", "openai-codex"], {
       cwd: new URL("../..", import.meta.url).pathname,
       env: home.env,
       stdout: "pipe",
