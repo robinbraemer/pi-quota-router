@@ -84,6 +84,9 @@ export async function performCodexLogin(options: {
     manualPromptAbort.abort();
   }
   await authorizationAction;
+  if (authorizationError) {
+    throw authorizationError;
+  }
   const label = sanitizeDisplay(options.label ?? "Codex account") || "Codex account";
   const id = await options.vault.addFromOAuth(label, credentials);
   await options.onAccountAdded?.({ id, label });

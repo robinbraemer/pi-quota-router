@@ -27,6 +27,7 @@ import { eventStream, message, successfulText } from "../fixtures/provider-strea
 import { createStorageFixture } from "../fixtures/storage.ts";
 import { completeUsageResponse } from "../fixtures/usage-responses.ts";
 
+const AUTHORIZATION_URL = `https://auth.openai.com/oauth/authorize?response_type=code&client_id=app_EMoamEEZ73f0CkXaXp7hrann&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback&code_challenge=${"a".repeat(43)}&code_challenge_method=S256&state=oauth-state`;
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => Promise.all(cleanups.splice(0).map((cleanup) => cleanup())));
 
@@ -637,6 +638,39 @@ describe("RouterController", () => {
     await controller.shutdown();
   });
 
+  test("routes a manual account without fetching usage", async () => {
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    let usageCalls = 0;
+    let routedAccessToken: string | undefined;
+    const manualCredentials = makeCredentials("account-2", 3_000_000_000_000, "manual");
+    const controller = await createRouterController({
+      paths: resolveRouterPaths(fixture.directory),
+      clock: () => 2_000_000_000_000,
+      oauth: { refresh: async () => manualCredentials },
+      fetchImpl: async () => {
+        usageCalls += 1;
+        throw new Error("usage endpoint unavailable");
+      },
+      baseStream: (_model, _context, options) => {
+        routedAccessToken = options?.apiKey;
+        return eventStream(successfulText());
+      },
+    });
+    await controller.vault.addFromOAuth(
+      "unrelated",
+      makeCredentials("account-1", 3_000_000_000_000, "unrelated"),
+    );
+    const manualAccountId = await controller.vault.addFromOAuth("manual", manualCredentials);
+    await controller.operations.use(manualAccountId);
+
+    await collectController(controller);
+
+    expect(usageCalls).toBe(0);
+    expect(routedAccessToken).toBe(manualCredentials.access);
+    await controller.shutdown();
+  });
+
   test("uses the configured maximum rotation attempts", async () => {
     const fixture = await createStorageFixture();
     cleanups.push(fixture.cleanup);
@@ -922,9 +956,7 @@ describe("RouterController", () => {
       clock: () => 2_000_000_000_000,
       oauth: { refresh: async () => credentials },
       login: async (callbacks) => {
-        callbacks.onAuth({
-          url: "https://auth.openai.com/oauth/authorize?response_type=code&client_id=codex-test&state=oauth-state",
-        });
+        callbacks.onAuth({ url: AUTHORIZATION_URL });
         return credentials;
       },
       fetchImpl: async () => Response.json(completeUsageResponse),

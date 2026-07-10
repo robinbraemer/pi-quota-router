@@ -237,14 +237,13 @@ export async function createRouterController(
       const candidates = await Promise.all(
         summaries.map(async (account): Promise<Candidate> => {
           const snapshot = config.manualAccountId
-            ? usage.peek(account.id)
+            ? undefined
             : await getUsage(account.id, {
-                  ...(request.options?.signal ? { signal: request.options.signal } : {}),
-                })
-                .catch(() => {
-                  request.options?.signal?.throwIfAborted();
-                  return undefined;
-                });
+                ...(request.options?.signal ? { signal: request.options.signal } : {}),
+              }).catch(() => {
+                request.options?.signal?.throwIfAborted();
+                return undefined;
+              });
           const block = state.blocks.find((value) => value.accountId === account.id);
           return {
             accountId: account.id,
@@ -253,7 +252,8 @@ export async function createRouterController(
             ...(snapshot ? { usage: snapshot } : {}),
             ...(block ? { block } : {}),
             untouched:
-              snapshot?.shortWindow.usedPercent === 0 &&
+              snapshot !== undefined &&
+              snapshot.shortWindow.usedPercent === 0 &&
               snapshot.weeklyWindow?.usedPercent === 0 &&
               snapshot.weeklyWindow.resetsAt === undefined &&
               !state.priming.confirmedAccountIds.includes(account.id),

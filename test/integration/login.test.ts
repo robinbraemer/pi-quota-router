@@ -172,6 +172,22 @@ describe("Codex command login", () => {
     expect(onAuthReturned).toBe(true);
   });
 
+  test("rejects credentials returned after an invalid authorization URL", async () => {
+    const harness = createLoginHarness(OPEN_ACTION);
+
+    await expect(
+      performCodexLogin({
+        ...harness.options,
+        login: async (callbacks) => {
+          callbacks.onAuth({ url: "https://attacker.example/oauth/authorize" });
+          return harness.credentials;
+        },
+      }),
+    ).rejects.toThrow("Unexpected Codex authorization URL");
+
+    expect(harness.added).toEqual([]);
+  });
+
   test("does not expose upstream OAuth token responses", async () => {
     const harness = createLoginHarness(OPEN_ACTION);
     const accessToken = harness.credentials.access;
