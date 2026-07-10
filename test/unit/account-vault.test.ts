@@ -212,6 +212,22 @@ describe("AccountVault", () => {
     expect(await vault.list()).toEqual([expect.objectContaining({ id, needsReauth: false })]);
   });
 
+  test("does not invalidate credentials replaced after an upstream rejection", async () => {
+    const { createVault } = await setup({
+      refresh: async () => makeCredentials("account-1", NOW + 3_600_000, "refreshed"),
+    });
+    const vault = createVault();
+    const rejected = makeCredentials("account-1", NOW + 3_600_000, "rejected");
+    const id = await vault.addFromOAuth("work", rejected);
+    const relogged = makeCredentials("account-1", NOW + 3_600_000, "relogged");
+
+    await vault.addFromOAuth("work", relogged);
+    await vault.markNeedsReauth(id, rejected.access, "revoked");
+
+    expect(await vault.list()).toEqual([expect.objectContaining({ id, needsReauth: false })]);
+    expect((await vault.getFreshCredential(id)).accessToken).toBe(relogged.access);
+  });
+
   test("force refreshes a rejected but nominally unexpired access token", async () => {
     let refreshes = 0;
     const { createVault } = await setup({

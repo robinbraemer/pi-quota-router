@@ -37,6 +37,7 @@ function dependencies(accounts: string[], baseStream: RoutedStreamDependencies["
   const selected: string[] = [];
   const released: string[] = [];
   const recorded: string[] = [];
+  const succeeded: string[] = [];
   const renewed: string[] = [];
   const value: RoutedStreamDependencies = {
     selectAndReserve: async ({ excludedAccountIds }) => {
@@ -70,6 +71,9 @@ function dependencies(accounts: string[], baseStream: RoutedStreamDependencies["
     recordFailure: async (accountId) => {
       recorded.push(accountId);
     },
+    recordSuccess: (accountId) => {
+      succeeded.push(accountId);
+    },
     release: async (leaseToken) => {
       released.push(leaseToken);
     },
@@ -80,7 +84,7 @@ function dependencies(accounts: string[], baseStream: RoutedStreamDependencies["
     waitForRecovery: async () => undefined,
     maxAttempts: () => 5,
   };
-  return { value, selected, released, recorded, renewed };
+  return { value, selected, released, recorded, renewed, succeeded };
 }
 
 describe("RoutedStream", () => {
@@ -108,6 +112,7 @@ describe("RoutedStream", () => {
     expect(setup.selected).toEqual(["a", "b"]);
     expect(setup.released.sort()).toEqual(["lease-a", "lease-b"]);
     expect(setup.recorded).toEqual(["a"]);
+    expect(setup.succeeded).toEqual(["b"]);
     expect(optionsSeen[1]).toEqual(
       expect.objectContaining({
         apiKey: "token-b",
@@ -130,6 +135,7 @@ describe("RoutedStream", () => {
     expect(events.map((event) => event.type)).toEqual(["start", "text_start", "error"]);
     expect(setup.selected).toEqual(["a"]);
     expect(setup.recorded).toEqual(["a"]);
+    expect(setup.succeeded).toEqual([]);
   });
 
   test("never rotates when an iterator throws after visible output", async () => {

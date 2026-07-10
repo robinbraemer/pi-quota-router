@@ -401,6 +401,7 @@ function routedDependencies(baseStream: RoutedStreamDependencies["baseStream"]):
       baseStream,
       classifyFailure: (error) => classifyFailure(error, NOW),
       recordFailure: async () => undefined,
+      recordSuccess: () => undefined,
       release: async () => undefined,
       renew: async () => true,
       waitForRecovery: async () => undefined,

@@ -45,7 +45,12 @@ export interface RoutedStreamDependencies {
   ): Promise<FreshCredential>;
   baseStream: StreamFunction<"openai-codex-responses", SimpleStreamOptions>;
   classifyFailure(error: unknown): FailureClass;
-  recordFailure(accountId: string, failure: FailureClass): Promise<void>;
+  recordFailure(
+    accountId: string,
+    rejectedAccessToken: string | undefined,
+    failure: FailureClass,
+  ): Promise<void>;
+  recordSuccess(accountId: string): void;
   release(leaseToken: string): Promise<void>;
   renew(leaseToken: string, ttlMs: number): Promise<boolean>;
   waitForRecovery(
@@ -150,7 +155,11 @@ export function createRoutedStream(
                     continue providerAttempt;
                   }
                   if (canRotateBeforeOutput(failure) && !options?.signal?.aborted) {
-                    await dependencies.recordFailure(lease.accountId, failure);
+                    await dependencies.recordFailure(
+                      lease.accountId,
+                      credential.accessToken,
+                      failure,
+                    );
                   }
                   if (
                     boundary.isReplaySafe() &&
@@ -175,6 +184,7 @@ export function createRoutedStream(
                   pendingStart = undefined;
                 }
                 if (event.type === "done") {
+                  dependencies.recordSuccess(lease.accountId);
                   await heartbeat.stop();
                   await release();
                   output.push(event);
@@ -206,7 +216,7 @@ export function createRoutedStream(
                 continue;
               }
               if (canRotateBeforeOutput(failure) && !options?.signal?.aborted) {
-                await dependencies.recordFailure(lease.accountId, failure);
+                await dependencies.recordFailure(lease.accountId, credential.accessToken, failure);
               }
               if (
                 boundary.isReplaySafe() &&
@@ -230,7 +240,7 @@ export function createRoutedStream(
           lastFailure = error;
           const failure = dependencies.classifyFailure(error);
           if (canRotateBeforeOutput(failure) && !options?.signal?.aborted) {
-            await dependencies.recordFailure(lease.accountId, failure);
+            await dependencies.recordFailure(lease.accountId, undefined, failure);
           }
           if (
             boundary.isReplaySafe() &&

@@ -44,7 +44,11 @@ export interface AccountVault {
   ): Promise<FreshCredential>;
   remove(id: string): Promise<void>;
   rename(id: string, label: string): Promise<void>;
-  markNeedsReauth(id: string, reason: AuthInvalidationReason): Promise<void>;
+  markNeedsReauth(
+    id: string,
+    rejectedAccessToken: string,
+    reason: AuthInvalidationReason,
+  ): Promise<boolean>;
 }
 
 export class AccountNeedsReauthError extends Error {
@@ -264,8 +268,8 @@ export function createAccountVault(options: AccountVaultOptions): AccountVault {
       });
     },
 
-    async markNeedsReauth(id) {
-      await markNeedsReauth(options.store, id);
+    async markNeedsReauth(id, rejectedAccessToken) {
+      return markNeedsReauth(options.store, id, rejectedAccessToken);
     },
   };
 }
@@ -298,13 +302,20 @@ function awaitWithSignal<T>(promise: Promise<T>, signal?: AbortSignal): Promise<
 async function markNeedsReauth(
   store: AtomicJsonStore<AccountVaultFile>,
   id: string,
-): Promise<void> {
-  await store.update((file) => ({
+  rejectedAccessToken: string,
+): Promise<boolean> {
+  const updated = await store.update((file) => ({
     ...file,
     accounts: file.accounts.map((account) =>
-      account.id === id ? { ...account, needsReauth: true } : account,
+      account.id === id && account.accessToken === rejectedAccessToken
+        ? { ...account, needsReauth: true }
+        : account,
     ),
   }));
+  return updated.accounts.some(
+    (account) =>
+      account.id === id && account.accessToken === rejectedAccessToken && account.needsReauth,
+  );
 }
 
 async function invalidateRefreshSource(

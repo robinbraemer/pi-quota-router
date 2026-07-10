@@ -109,7 +109,7 @@ export async function createRouterController(
       return await request(refreshed.accessToken, refreshed.accountId);
     } catch (error) {
       if (error instanceof CodexUsageHttpError && error.status === 401) {
-        await vault.markNeedsReauth(accountId, "revoked");
+        await vault.markNeedsReauth(accountId, refreshed.accessToken, "revoked");
         throw new AccountNeedsReauthError();
       }
       throw error;
@@ -120,7 +120,8 @@ export async function createRouterController(
     freshnessMs: () => cachedConfig.usageFreshnessMs,
     fetchUsage,
   });
-  let currentAccountId: string | undefined;
+  let displayAccountId: string | undefined;
+  let lastSuccessfulAccountId: string | undefined;
   let currentLabel = "none";
   let currentModelId = codexModels[0]?.id ?? "";
   let loggingEnabled = true;
@@ -219,7 +220,7 @@ export async function createRouterController(
           candidates,
           config,
           now: clock(),
-          ...(currentAccountId ? { currentAccountId } : {}),
+          ...(lastSuccessfulAccountId ? { currentAccountId: lastSuccessfulAccountId } : {}),
         },
         owner: {
           processId: process.pid,
@@ -229,14 +230,14 @@ export async function createRouterController(
         now: clock(),
       });
       if (selected.reservation) {
-        currentAccountId = selected.reservation.accountId;
+        displayAccountId = selected.reservation.accountId;
         currentLabel =
-          summaries.find((account) => account.id === currentAccountId)?.label ?? currentAccountId;
+          summaries.find((account) => account.id === displayAccountId)?.label ?? displayAccountId;
         if (loggingEnabled) {
           await eventLog.append({
             type: "account_selected",
             at: clock(),
-            accountId: currentAccountId,
+            accountId: displayAccountId,
             detail: { reason: selected.decision.reason },
           });
         }
@@ -261,9 +262,13 @@ export async function createRouterController(
       vault.forceRefreshCredential(accountId, rejectedAccessToken, signal),
     baseStream: options.baseStream,
     classifyFailure: (error) => classifyFailure(error, clock()),
-    async recordFailure(accountId, failure: FailureClass) {
-      if (failure.kind === "auth-invalid") {
-        await vault.markNeedsReauth(accountId, "invalid_grant");
+    async recordFailure(accountId, rejectedAccessToken, failure: FailureClass) {
+      if (
+        failure.kind === "auth-invalid" &&
+        rejectedAccessToken &&
+        !(await vault.markNeedsReauth(accountId, rejectedAccessToken, "invalid_grant"))
+      ) {
+        return;
       }
       const snapshot =
         failure.kind === "quota"
@@ -286,6 +291,9 @@ export async function createRouterController(
       }
       usage.invalidate(accountId);
     },
+    recordSuccess(accountId) {
+      lastSuccessfulAccountId = accountId;
+    },
     release: (leaseToken) => reservations.release(leaseToken).then(() => undefined),
     renew: (leaseToken, ttlMs) => reservations.renew(leaseToken, clock(), ttlMs),
     waitForRecovery: (accountIds, knownAccountIds, signal) =>
@@ -304,9 +312,9 @@ export async function createRouterController(
   const statusText = async (): Promise<string> => {
     const [config, accounts] = await Promise.all([configStore.read(), vault.list()]);
     cachedConfig = config;
-    const displayAccountId = config.manualAccountId ?? currentAccountId ?? accounts[0]?.id;
-    const displayAccount = accounts.find((account) => account.id === displayAccountId);
-    const snapshot = displayAccountId ? usage.peek(displayAccountId) : undefined;
+    const statusAccountId = config.manualAccountId ?? displayAccountId ?? accounts[0]?.id;
+    const displayAccount = accounts.find((account) => account.id === statusAccountId);
+    const snapshot = statusAccountId ? usage.peek(statusAccountId) : undefined;
     return formatCompactStatus({
       label: displayAccount?.label ?? currentLabel,
       ...(snapshot ? { snapshot } : {}),
@@ -363,7 +371,7 @@ export async function createRouterController(
           (block) => block.accountId !== result.id || block.kind !== "auth",
         ),
       }));
-      currentAccountId = result.id;
+      displayAccountId = result.id;
       currentLabel = result.label;
       return result.message;
     },

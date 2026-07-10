@@ -125,18 +125,24 @@ export function createPrimingController(options: PrimingControllerOptions): Prim
         return { status: "not_candidate" };
       }
 
-      await options.executePrimer(
-        {
-          accountId,
-          modelId: invocation?.modelId ?? options.currentModelId(),
-          prompt: ".",
-          messages: [],
-          tools: [],
-          reasoning: options.lowestReasoning(),
-          maxTokens: 1,
-        },
-        signal,
-      );
+      let providerFailed = false;
+      try {
+        await options.executePrimer(
+          {
+            accountId,
+            modelId: invocation?.modelId ?? options.currentModelId(),
+            prompt: ".",
+            messages: [],
+            tools: [],
+            reasoning: options.lowestReasoning(),
+            maxTokens: 1,
+          },
+          signal,
+        );
+      } catch {
+        signal.throwIfAborted();
+        providerFailed = true;
+      }
       const after = await options.usage.get(accountId, {
         force: true,
         signal,
@@ -156,11 +162,11 @@ export function createPrimingController(options: PrimingControllerOptions): Prim
             },
           };
         });
-        return { status: "confirmed", resetAt };
+        return providerFailed ? { status: "failed" } : { status: "confirmed", resetAt };
       }
 
       await applyRetryCooldown(options, accountId, now, config.priming.retryCooldownMs);
-      return { status: "inconclusive" };
+      return providerFailed ? { status: "failed" } : { status: "inconclusive" };
     } catch (_error) {
       if (controller.signal.aborted) {
         throw controller.signal.reason;

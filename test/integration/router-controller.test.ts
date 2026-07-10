@@ -3,7 +3,11 @@ import { chmod } from "node:fs/promises";
 import type { AssistantMessageEvent, Context, Model } from "@earendil-works/pi-ai";
 import { OPENAI_CODEX_MODELS } from "@earendil-works/pi-ai/providers/openai-codex.models";
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { createRouterController } from "../../src/router-controller.ts";
+import { deriveManagedAccountId } from "../../src/accounts/account-identity.ts";
+import {
+  createRouterController,
+  type RouterControllerOptions,
+} from "../../src/router-controller.ts";
 import { createAtomicJsonStore } from "../../src/storage/atomic-json-store.ts";
 import { resolveRouterPaths } from "../../src/storage/paths.ts";
 import {
@@ -36,7 +40,7 @@ describe("RouterController", () => {
       baseStream: () => eventStream(successfulText()),
     });
     const accountId = await controller.vault.addFromOAuth("work", credentials);
-    await controller.vault.markNeedsReauth(accountId, "invalid_grant");
+    await controller.vault.markNeedsReauth(accountId, credentials.access, "invalid_grant");
     const stateStore = createAtomicJsonStore<RuntimeStateFile>({
       path: paths.state,
       schema: RuntimeStateFileSchema,
@@ -146,6 +150,59 @@ describe("RouterController", () => {
     );
 
     expect((await controller.vault.list())[0]?.needsReauth).toBe(true);
+    await controller.shutdown();
+  });
+
+  test("does not block credentials replaced during a routed auth failure", async () => {
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    const paths = resolveRouterPaths(fixture.directory);
+    const rejected = makeCredentials("account-1", 3_000_000_000_000, "rejected");
+    const relogged = makeCredentials("account-1", 3_000_000_000_000, "relogged");
+    let markAttemptStarted: (() => void) | undefined;
+    const attemptStarted = new Promise<void>((resolve) => {
+      markAttemptStarted = resolve;
+    });
+    let finishAttempt: (() => void) | undefined;
+    const attemptHeld = new Promise<void>((resolve) => {
+      finishAttempt = resolve;
+    });
+    const controller = await createRouterController({
+      paths,
+      clock: () => 2_000_000_000_000,
+      oauth: { refresh: async () => relogged },
+      fetchImpl: async () => Response.json(completeUsageResponse),
+      baseStream: (() => {
+        const stream = (async function* () {
+          markAttemptStarted?.();
+          await attemptHeld;
+          yield {
+            type: "error",
+            reason: "error",
+            error: message("error", "invalid_grant"),
+          } as AssistantMessageEvent;
+        })();
+        return stream;
+      }) as unknown as RouterControllerOptions["baseStream"],
+    });
+    const accountId = await controller.vault.addFromOAuth("work", rejected);
+    const request = collectController(controller);
+    await attemptStarted;
+
+    await controller.vault.addFromOAuth("work", relogged);
+    finishAttempt?.();
+    await request;
+
+    const stateStore = createAtomicJsonStore<RuntimeStateFile>({
+      path: paths.state,
+      schema: RuntimeStateFileSchema,
+      createDefault: () => structuredClone(defaultRuntimeState),
+    });
+    expect((await controller.vault.list())[0]?.needsReauth).toBe(false);
+    expect((await stateStore.read()).blocks).toEqual([]);
+    expect((await controller.vault.getFreshCredential(accountId)).accessToken).toBe(
+      relogged.access,
+    );
     await controller.shutdown();
   });
 
@@ -259,6 +316,71 @@ describe("RouterController", () => {
     await controller.vault.addFromOAuth("work", makeCredentials("account-1", 3_000_000_000_000));
 
     expect(await controller.operations.status()).toBe("Codex · work · auto");
+    await controller.shutdown();
+  });
+
+  test("shows a login without treating it as a successful automatic route", async () => {
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    const { preferredAccountId, otherAccountId } = automaticTieAccountIds();
+    const preferred = makeCredentials(preferredAccountId, 3_000_000_000_000, "preferred");
+    const loggedIn = makeCredentials(otherAccountId, 3_000_000_000_000, "logged-in");
+    let routedToken: string | undefined;
+    const controller = await createRouterController({
+      paths: resolveRouterPaths(fixture.directory),
+      clock: () => 2_000_000_000_000,
+      oauth: { refresh: async () => loggedIn },
+      login: async () => loggedIn,
+      fetchImpl: async () => Response.json(completeUsageResponse),
+      baseStream: (_model, _context, options) => {
+        routedToken = options?.apiKey;
+        return eventStream(successfulText());
+      },
+    });
+    await controller.vault.addFromOAuth("preferred", preferred);
+
+    await controller.operations.login("recent", { ui: {} } as ExtensionCommandContext);
+
+    expect(await controller.operations.status()).toContain("recent");
+    await collectController(controller);
+    expect(routedToken).toBe(preferred.access);
+    await controller.shutdown();
+  });
+
+  test("does not use a failed manual route for automatic hysteresis", async () => {
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    const { preferredAccountId, otherAccountId } = automaticTieAccountIds();
+    const preferred = makeCredentials(preferredAccountId, 3_000_000_000_000, "preferred");
+    const manual = makeCredentials(otherAccountId, 3_000_000_000_000, "manual");
+    const routedTokens: string[] = [];
+    const controller = await createRouterController({
+      paths: resolveRouterPaths(fixture.directory),
+      clock: () => 2_000_000_000_000,
+      oauth: { refresh: async () => manual },
+      fetchImpl: async () => Response.json(completeUsageResponse),
+      baseStream: (_model, _context, options) => {
+        routedTokens.push(options?.apiKey ?? "");
+        return routedTokens.length === 1
+          ? eventStream([
+              {
+                type: "error",
+                reason: "error",
+                error: message("error", "invalid request"),
+              },
+            ])
+          : eventStream(successfulText());
+      },
+    });
+    await controller.vault.addFromOAuth("preferred", preferred);
+    const manualId = await controller.vault.addFromOAuth("manual", manual);
+    await controller.operations.use(manualId);
+
+    await collectController(controller);
+    await controller.operations.use("auto");
+    await collectController(controller);
+
+    expect(routedTokens).toEqual([manual.access, preferred.access]);
     await controller.shutdown();
   });
 
@@ -634,6 +756,16 @@ async function collectController(controller: Awaited<ReturnType<typeof createRou
     events.push(event);
   }
   return events;
+}
+
+function automaticTieAccountIds() {
+  const [preferredAccountId, otherAccountId] = ["account-1", "account-2"].sort((left, right) =>
+    deriveManagedAccountId(left).localeCompare(deriveManagedAccountId(right)),
+  );
+  if (!preferredAccountId || !otherAccountId) {
+    throw new Error("expected two test accounts");
+  }
+  return { preferredAccountId, otherAccountId };
 }
 
 async function setupDuplicateLabels() {

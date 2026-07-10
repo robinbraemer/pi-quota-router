@@ -92,7 +92,7 @@ async function setup(options?: {
     lowestReasoning: () => "minimal",
     ...(options?.onBackgroundError ? { onBackgroundError: options.onBackgroundError } : {}),
   });
-  return { controller, store, requests };
+  return { controller, store, requests, usageReads: () => reads };
 }
 
 describe("PrimingController", () => {
@@ -147,6 +147,20 @@ describe("PrimingController", () => {
     const { controller, store } = await setup({ authorized: true });
     expect(await controller.primeAccount("a")).toEqual({ status: "inconclusive" });
     expect((await store.read()).priming.retryAfter.a).toBe(NOW + 3_600_000);
+  });
+
+  test("observes usage after a failed provider attempt", async () => {
+    const { controller, store, usageReads } = await setup({
+      authorized: true,
+      refreshed: untouched(NOW + 604_800_000),
+      execute: async () => {
+        throw new Error("provider failed after accepting the request");
+      },
+    });
+
+    expect(await controller.primeAccount("a")).toEqual({ status: "failed" });
+    expect(usageReads()).toBe(2);
+    expect((await store.read()).priming.confirmedAccountIds).toEqual(["a"]);
   });
 
   test("does not start while foreground work is active", async () => {
