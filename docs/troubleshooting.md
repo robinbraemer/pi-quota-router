@@ -18,10 +18,10 @@ Start with:
 | `invalid` | Close peer Pi processes, use `/quota-router path`, preserve a copy of the directory, and inspect JSON syntax/schema. Do not overwrite `accounts.json` unless you are prepared to reauthenticate. |
 | Footer ends in `login` | No account has completed login; run `/quota-router login`. |
 | Footer contains `?` | Run `/quota-router refresh all`; the weekly clock may genuinely be absent on an untouched account. |
-| Account says `reauth required` | Run `/quota-router login <same-label>` with that Codex identity. A successful duplicate login replaces the saved credentials. |
+| Account says `reauth required` | Run `/quota-router login <same-label>` with that Codex identity. A successful duplicate login replaces the saved credentials and clears its authentication block. |
 | Browser or clipboard authorization action fails | Use the authorization URL printed above the selector. The URL is always preserved as a manual fallback. |
 | Footer still shows `none · login` after successful login | Run `/quota-router list` to confirm the account, then `/quota-router status`. Current versions rerender immediately; update the Git package if the stale footer persists. |
-| `no_eligible_accounts` | Refresh usage, inspect policy/headroom, prime confirmed untouched accounts, or wait for cooldowns. A deliberate `/quota-router use <account>` can bypass automatic headroom. |
+| `no_eligible_accounts` | Refresh usage, inspect policy/headroom, prime confirmed untouched accounts, or wait for cooldowns. A fresh non-exhausted result clears an estimated block. A deliberate `/quota-router use <account>` can bypass automatic headroom. |
 | `manual_account_unavailable` | Reauthenticate/clear the account's block, wait for its reservation, or run `/quota-router use auto`. |
 | `not_authorized` from prime | Invoke `/quota-router prime ...` interactively and accept both confirmations. |
 | `not_candidate` from prime | The account is already confirmed, is not untouched, or is inside the one-hour primer retry cooldown. |

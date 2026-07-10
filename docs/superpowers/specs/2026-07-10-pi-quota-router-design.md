@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-10
 
-**Status:** Approved for implementation planning
+**Status:** Implemented
 
 **Target:** normal Pi (`@earendil-works/pi-*`), Node.js `>=22.19.0`
 **Scope:** equivalent ChatGPT Codex OAuth accounts only
@@ -32,7 +32,7 @@ The router does not merely choose the lowest usage percentage. It:
 - Keep routing deterministic, explainable, observable, abortable, and safe under multiple Pi processes.
 - Recover transparently from pre-output quota, authentication, and token-refresh failures.
 - Provide a coherent `/quota-router` command family and a compact footer.
-- Store credentials and state with atomic writes, explicit permissions, migrations, and lock protection.
+- Store credentials and state with atomic writes, explicit permissions, strict schemas, and lock protection.
 
 ## Non-goals
 
@@ -153,10 +153,10 @@ The provider override is the only component coupled to Pi's streaming types. Sel
 - Mirrors built-in Codex model metadata.
 - Obtains Pi's built-in `openai-codex-responses` stream implementation.
 - Installs `RoutedStream` without changing model ids or thinking metadata.
-- Registers with the first active access token when one exists. If the vault is
-  empty, it uses a non-secret `pending-login` sentinel only to satisfy Pi's
-  provider-registration contract; `RoutedStream` rejects locally with login
-  guidance before the built-in stream can receive that sentinel.
+- Registers with a non-secret `pending-login` sentinel only to satisfy Pi's
+  provider-registration contract; `RoutedStream` supplies the selected
+  account's token for real requests and rejects locally with login guidance
+  when the vault is empty.
 
 ### `src/router-controller.ts`
 
@@ -179,8 +179,7 @@ The provider override is the only component coupled to Pi's streaming types. Sel
 - Creates files with mode `0600`.
 - Writes a same-directory temporary file, flushes it, and renames it atomically.
 - Serializes writers with `proper-lockfile` and a bounded stale-lock policy.
-- Preserves one validated migration backup before schema changes.
-- Recovers from an abandoned temporary file without replacing a valid primary.
+- Removes an unfinished temporary file when a write fails without replacing a valid primary.
 
 ### `src/usage/codex-usage.ts`
 
@@ -192,8 +191,8 @@ The provider override is the only component coupled to Pi's streaming types. Sel
 
 ### `src/usage/usage-service.ts`
 
-- Caches snapshots for five minutes with per-account jitter.
-- Coalesces concurrent refreshes.
+- Caches snapshots for five minutes.
+- Coalesces concurrent refreshes per account; cancelling one caller does not cancel the shared fetch for other callers.
 - Keeps a last-good snapshot for 24 hours, clearly marked stale.
 - Forces a fresh fetch after priming and quota errors.
 - Limits concurrent upstream usage requests to two.
@@ -230,13 +229,13 @@ The provider override is the only component coupled to Pi's streaming types. Sel
 - Treats `start` as transport metadata, not model output.
 - Marks replay unsafe only after text, thinking, or tool-call content starts.
 - On a pre-output quota/auth error, blocks the account, releases the lease, and retries another account up to five times.
-- On any post-output error, records state and forwards the error unchanged.
+- On any post-output error, forwards the error unchanged without rotation.
 - If all accounts are temporarily blocked before output, waits abortably for the earliest recovery for at most six hours.
 
 ### `src/status/status-controller.ts`
 
-- Renders a compact footer with active account, 5-hour remaining, weekly remaining, reset countdown, routing reason, and primer state.
-- Uses cached data immediately and refreshes in the background.
+- Renders a compact footer with active account, 5-hour remaining, weekly remaining, reset countdown, urgency, and routing mode.
+- Uses cached data immediately; normal selection and explicit refreshes populate the cache.
 - Keeps rendering independent from routing success.
 
 ### `src/commands/commands.ts`
@@ -270,7 +269,7 @@ interface ManagedCodexAccount {
 }
 ```
 
-`id` is a stable truncated SHA-256 of `accountId`, prefixed with `codex-`. Duplicate `accountId` logins update the existing account after confirmation instead of creating another quota slot.
+`id` is a stable truncated SHA-256 of `accountId`, prefixed with `codex-`. Duplicate `accountId` logins update the existing account instead of creating another quota slot and clear any persisted authentication block.
 
 ### Config
 
@@ -314,7 +313,7 @@ Defaults:
 - `priming.maximumPerSweep`: `1`
 - `priming.retryCooldownMs`: `3600000`
 
-Synthetic priming requires both priming booleans. `/quota-router setup` explains that the action deliberately spends a small amount of quota and records both confirmations.
+Synthetic priming requires both priming booleans. `/quota-router prime` explains that the action deliberately spends a small amount of quota and records both confirmations before attempting any account.
 
 ### Runtime state
 
@@ -322,13 +321,13 @@ Path: `~/.pi/agent/pi-quota-router/state.json`
 
 Contains no credentials:
 
-- Usage snapshots and freshness markers.
 - Account cooldowns and their source.
 - Primer status and retry time.
 - Reservations.
 - Last selection explanation.
-- Recent bounded routing events.
 - Schema version.
+
+The version-one schema also reserves `usageSnapshots` and `events` arrays. The current controller keeps usage snapshots in memory and writes operational diagnostics to `events.ndjson`, so those state arrays remain empty.
 
 ## Selection policy
 
@@ -384,13 +383,7 @@ The current account is retained when its urgency is within 10% of the winner and
 
 ### Manual override
 
-A manually selected account wins while eligible. It is released automatically only when:
-
-- It becomes exhausted.
-- Authentication fails definitively.
-- The operator returns to automatic routing.
-
-The router never silently overrides a healthy manual selection because of a better quota score.
+A manually selected account bypasses automatic freshness, untouched-clock, and headroom checks, but remains unavailable when it needs reauthentication, has an active block, or has a live reservation. The override stays configured until the operator runs `/quota-router use auto`; the router never silently substitutes an automatically ranked account.
 
 ### Headroom limitation
 
@@ -416,7 +409,7 @@ The synthetic primer:
 - Uses the current Codex model to avoid crossing capability pools.
 - Uses no tools and no conversation history.
 - Uses the lowest supported reasoning level.
-- Requests the exact response `.` with the smallest supported output budget.
+- Sends `.` as the prompt with a one-token output budget.
 - Runs only while Pi is idle.
 - Runs one account at a time.
 - Holds a reservation for the full request.
@@ -433,18 +426,17 @@ Classify quota/rate-limit failures from:
 
 - HTTP-equivalent error metadata when exposed.
 - `429`, `quota`, `usage limit`, `rate limit`, `too many requests`, and Codex usage-limit codes.
-- Fresh usage showing an exhausted active window.
 
-After a quota failure, force-refresh usage and block until the earliest reset among exhausted windows. If no reliable reset exists, use a one-hour cooldown, capped at six hours per observation.
+After a quota failure, force-refresh usage. An explicit provider retry time controls the block; otherwise use the earliest reset among exhausted windows. If neither is available, use a one-hour cooldown. Every observed deadline is capped at six hours.
 
-Fresh usage may shorten an estimated cooldown but never extend it beyond the latest live error-derived observation.
+An explicit forced refresh reconciles an estimated cooldown: available quota clears it, while an observed exhausted-window reset can replace the estimate without extending the current deadline.
 
 ### Authentication classification
 
 - Refresh expired tokens before the request.
 - Coalesce concurrent refreshes.
 - On the first generic `401`, force-refresh once and retry the same account before rotating.
-- Definitive `invalid_grant`, revoked-token, or invalid-refresh responses mark the account `needsReauth` immediately.
+- Definitive `invalid_grant`, revoked-token, malformed access-token, or identity-mismatch responses mark the account `needsReauth` immediately.
 - A transient refresh network failure causes a one-minute cooldown, not permanent invalidation.
 - No credential value appears in logs, notifications, state, or thrown messages.
 
@@ -462,7 +454,7 @@ Before any output, the wrapper waits for the earliest known recovery when:
 - The wait is at most six hours.
 - The caller's abort signal remains active.
 
-The wait re-checks persisted state at least once per minute so a peer process login, refresh, or usage correction can wake the request early. Escape/user abort ends the wait immediately.
+The wait re-checks persisted state and the managed account list at most once per minute, so a peer process login, refresh, usage correction, or reservation release can wake the request before the original retry deadline. Escape/user abort ends the wait immediately.
 
 ## Concurrency model
 
@@ -473,7 +465,7 @@ Multiple Pi processes share the same vault and state directory.
 - Account selection and lease acquisition are one atomic critical section.
 - A selected account is unavailable to other request ids until release or lease expiry.
 - OAuth refresh uses an account-specific lock and re-check-after-lock.
-- Usage fetches are coalesced per process; persisted freshness lets peers avoid redundant calls.
+- Usage fetches are coalesced per account within a process.
 - Primer sweeps use a singleton lease, so only one process primes at a time.
 - Locks have bounded acquisition time and stale-owner recovery.
 - Lock timeout never causes an unsafe write; the operation returns a visible retryable error.
@@ -482,16 +474,18 @@ Multiple Pi processes share the same vault and state directory.
 
 One command family:
 
-- `/quota-router` — open the dashboard.
-- `/quota-router status` — print active account, policy, usage, reservations, cooldowns, and primer queue.
-- `/quota-router accounts` — manage, select, refresh, reauthenticate, remove, and label accounts.
+- `/quota-router` — show compact status and the highlighted command guide.
+- `/quota-router help` — show the same status and command guide.
+- `/quota-router status` — print compact active-account and quota status.
+- `/quota-router list` — list managed ids, labels, and reauthentication state.
+- `/quota-router accounts` — alias of `list`.
 - `/quota-router login [label]` — add or update a Codex OAuth account.
 - `/quota-router use <account|auto>` — set or clear manual override.
-- `/quota-router refresh [account|all]` — force token and usage validation.
-- `/quota-router prime [account|all]` — run or queue explicitly authorized primers.
-- `/quota-router policy` — inspect or edit routing, headroom, and priming settings.
+- `/quota-router refresh [account|all]` — refresh OAuth if needed and force fresh quota usage.
+- `/quota-router prime [account|all]` — confirm and run primers for selected untouched accounts.
+- `/quota-router policy` — print the active routing, headroom, and priming configuration.
 - `/quota-router reset <cooldowns|reservations|priming|all>` — clear recoverable state without deleting credentials.
-- `/quota-router verify` — validate permissions, schemas, locks, usage access, and provider registration.
+- `/quota-router verify` — validate persisted schemas and required file permissions.
 - `/quota-router path` — show vault, config, state, and log paths.
 - `/quota-router log [on|off]` — show or toggle the bounded diagnostic log.
 
@@ -503,13 +497,13 @@ The footer shows:
 Codex · work@example · 5h 72% · 7d 41%/18h · urgent 0.023/h · auto
 ```
 
-Primer, manual, stale, cooldown, and reservation states replace `auto` when applicable.
+The final field is `auto`, `manual`, or `login`; unknown usage or reset values render as `?`.
 
 ## Persistence and security
 
 - Router directory: `0700`.
 - Credential, config, state, and log files: `0600`.
-- No credentials in state, backups, logs, error messages, or session entries.
+- No credentials in state, logs, error messages, or session entries.
 - Logs redact bearer tokens, JWT-like strings, API-key-like strings, and long opaque identifiers defensively.
 - Diagnostic log is bounded to 4 MiB with one rotated predecessor.
 - Account labels are treated as untrusted display strings and normalized before rendering.
@@ -520,26 +514,7 @@ Primer, manual, stale, cooldown, and reservation states replace `auto` when appl
 
 ## Observability
 
-Every decision emits a structured credential-free event:
-
-- `selection_started`
-- `usage_refreshed`
-- `candidate_rejected`
-- `account_reserved`
-- `account_selected`
-- `primer_started`
-- `primer_confirmed`
-- `primer_inconclusive`
-- `quota_blocked`
-- `auth_refresh_started`
-- `auth_refresh_succeeded`
-- `auth_invalidated`
-- `rotation_applied`
-- `recovery_wait_started`
-- `recovery_wait_ended`
-- `request_completed`
-
-The selection event records every candidate's freshness, remaining percentages, reset duration, urgency, eligibility reason, and tie-break result without recording tokens or raw account ids.
+Each atomic selection persists a credential-free `lastSelection` explanation in `state.json`, including candidate freshness, remaining percentages, urgency, eligibility reasons, and the tie-break result. The bounded `events.ndjson` log records selected accounts, quota/auth invalidations, and detached primer failures with managed ids rather than raw Codex account ids. `/quota-router log off` disables new diagnostic entries for the current controller process.
 
 ## Testing strategy
 
@@ -569,7 +544,7 @@ The selection event records every candidate's freshness, remaining percentages, 
 - Pre-output quota failure rotates and replays once.
 - A transport `start` event does not prohibit replay.
 - Text, thinking, or tool-call start prohibits replay.
-- Abort cancels usage fetch, token refresh wait, provider stream, and recovery sleep.
+- Abort cancels the caller's usage wait, token refresh wait, provider stream, and recovery sleep; a shared usage fetch remains alive for other callers.
 - Maximum rotation attempts is enforced.
 - All-limited wait wakes on the first recovered account.
 - No permanent-invalid account participates in waiting.
@@ -577,18 +552,22 @@ The selection event records every candidate's freshness, remaining percentages, 
 ### Auth and concurrency tests
 
 - Concurrent refresh callers invoke the OAuth endpoint once.
+- Concurrent usage callers share one refresh even when one caller aborts.
 - Cross-process refresh reuses the peer's newly persisted token.
 - Selection plus reservation is atomic.
 - Abandoned leases expire.
 - Two controllers never reserve the same account simultaneously.
 - Duplicate `accountId` login updates rather than duplicates.
+- Successful reauthentication clears the account's permanent auth block.
+- Forced fresh non-exhausted usage clears an estimated cooldown.
+- Recovery waiting notices an account added by a peer.
 
 ### Storage tests
 
 - New directories and files receive exact permissions.
 - Interrupted temporary writes leave the primary readable.
 - Invalid JSON does not overwrite the last valid file.
-- Migration creates one permission-correct backup.
+- Abandoned temporary files do not replace a valid primary.
 - Lock acquisition timeout returns a visible error.
 - Secrets never appear in state or logs.
 
@@ -597,7 +576,6 @@ The selection event records every candidate's freshness, remaining percentages, 
 - Mirrored Codex model metadata remains unchanged.
 - Provider and event names remain `openai-codex`.
 - Thinking levels pass through unchanged.
-- Text, image, tool-call, overflow, empty, unicode, and abort provider cases match normal Pi's custom-provider testing guidance.
 - Package installs outside a Pi monorepo and resolves only public exports.
 
 ## Toolchain and dependency policy
@@ -624,15 +602,15 @@ A release is blocked unless:
 - Lint and typecheck pass with zero diagnostics.
 - All tests pass.
 - Production dependency audit has no unresolved high or critical advisory reachable from shipped code.
-- `npm pack --dry-run` contains only runtime files, docs, license, and schema assets.
+- `bun pm pack --dry-run --ignore-scripts` contains only the declared package files.
 - A clean external install can load the extension and list mirrored Codex models.
-- A fake-provider smoke test proves selection, reservation, pre-output rotation, post-output non-replay, primer confirmation, and abort handling.
+- End-to-end fake-provider tests prove selection, reservation, pre-output rotation, post-output non-replay, primer confirmation, and abort handling.
 - README behavior matches the executable selection policy tests.
 
 ## Success criteria
 
 - Equivalent Codex account selection requires no routine user decision.
-- Routing explanations identify model fit, freshness, headroom, urgency, and tie-breaks.
+- Routing explanations identify health, freshness, headroom, urgency, and tie-breaks.
 - High remaining quota near reset is spent before less urgent quota.
 - Similar-urgency accounts drain the least weekly remaining safe account.
 - Synthetic primer spend occurs only after explicit confirmation and is verified from fresh usage.

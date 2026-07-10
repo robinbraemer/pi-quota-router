@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-10
 
-**Status:** Approved by the live-use comment on PR #1 and the explicit instruction to implement every listed requirement
+**Status:** Implemented
 
 ## Outcome
 
@@ -18,7 +18,7 @@ Normal Pi users can deliberately choose how to handle the Codex OAuth URL, see a
 
 Opening uses `node:child_process.spawn` directly with platform arguments (`open`, `rundll32 url.dll,FileProtocolHandler`, or `xdg-open`) and never invokes a shell. Copying uses normal Pi's public `copyToClipboard` export. Selector, launcher, or clipboard failures produce a warning that repeats the URL; they never abort OAuth or hide the manual path.
 
-`performCodexLogin` tracks the asynchronous handoff started by OAuth's synchronous `onAuth` callback and waits for it before completing the command. The launcher and clipboard functions are dependency-injected for deterministic tests.
+`performCodexLogin` starts the asynchronous handoff from OAuth's synchronous `onAuth` callback without awaiting the selector. This prevents an unattended selector from blocking OAuth completion; handoff failures are contained because the printed URL remains usable. The launcher and clipboard functions are dependency-injected for deterministic tests.
 
 ## Immediate status ownership
 

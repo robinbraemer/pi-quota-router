@@ -41,7 +41,7 @@ Open normal Pi and add each Codex account with a distinct label:
 
 Each `login` opens Pi's normal OpenAI Codex OAuth flow. The router keeps its own multi-account vault and does not rewrite Pi's `auth.json`.
 
-When the authorization URL is ready, Pi shows an explicit action selector: open it in the default browser, copy it to the clipboard, or continue manually. The full URL always remains visible, including when a browser, clipboard, or interactive selector is unavailable. After credentials are saved, the footer rerenders immediately with the account label; it does not wait for a later agent turn.
+When the authorization URL is ready, Pi shows an explicit action selector: open it in the default browser, copy it to the clipboard, or continue manually. The full URL always remains visible, including when a browser, clipboard, or interactive selector is unavailable, and the selector does not block OAuth completion. After credentials are saved, the footer rerenders immediately with the account label; it does not wait for a later agent turn. Reauthenticating an existing identity also clears its persisted authentication block.
 
 After at least one account has a weekly reset timestamp, ordinary Codex prompts route automatically. The model id, capabilities, and selected thinking level are passed through unchanged.
 
@@ -99,7 +99,7 @@ Confirmed automatic priming is off by default. Once enabled, idle sweeps process
 | `/quota-router login [label]` | Add or reauthenticate a Codex account through Pi OAuth. |
 | `/quota-router use <account-or-label>` | Force a specific account, including below automatic headroom floors. |
 | `/quota-router use auto` | Return to quota-aware automatic routing. |
-| `/quota-router refresh [account-or-all]` | Refresh credentials if needed and force fresh quota usage. |
+| `/quota-router refresh [account-or-all]` | Refresh OAuth if needed and force fresh quota usage, reconciling estimated cooldowns. |
 | `/quota-router prime [account-or-all]` | Ask for both confirmations, then prime untouched accounts. |
 | `/quota-router policy` | Print the active JSON policy. |
 | `/quota-router reset cooldowns` | Clear persisted quota/auth cooldowns. |
@@ -133,7 +133,7 @@ By default, data lives in `~/.pi/agent/pi-quota-router/`. If `PI_CODING_AGENT_DI
 | --- | --- | ---: |
 | `accounts.json` | Raw account id, OAuth access/refresh tokens, labels, expiry | `0600` |
 | `config.json` | Routing, headroom, hysteresis, and priming policy | `0600` |
-| `state.json` | Non-secret usage, blocks, reservations, primer state | `0600` |
+| `state.json` | Non-secret blocks, reservations, primer state, last selection | `0600` |
 | `events.ndjson` | Redacted bounded operational events | `0600` |
 
 The containing directory is `0700`. Same-directory temporary files, lock targets, and the single rotated `events.ndjson.1` predecessor are also private. Details and threat limits are in [Security](docs/security.md).
