@@ -7,4 +7,4 @@ The extension will keep the selected Codex model fixed while choosing among equi
 Status: design and implementation planning.
 
 - [Design specification](docs/superpowers/specs/2026-07-10-pi-quota-router-design.md)
-- Implementation plan: added after specification review
+- [Implementation plan](docs/superpowers/plans/2026-07-10-pi-quota-router.md)
