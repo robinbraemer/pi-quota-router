@@ -179,6 +179,72 @@ describe("RouterController", () => {
     await controller.shutdown();
   });
 
+  test("manual routing does not fetch account usage", async () => {
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    let usageCalls = 0;
+    const controller = await createRouterController({
+      paths: resolveRouterPaths(fixture.directory),
+      clock: () => 2_000_000_000_000,
+      oauth: { refresh: async () => makeCredentials("account-1", 3_000_000_000_000) },
+      fetchImpl: async () => {
+        usageCalls += 1;
+        return Response.json(completeUsageResponse);
+      },
+      baseStream: () => eventStream(successfulText()),
+    });
+    const selectedId = await controller.vault.addFromOAuth(
+      "first",
+      makeCredentials("account-1", 3_000_000_000_000),
+    );
+    await controller.vault.addFromOAuth("second", makeCredentials("account-2", 3_000_000_000_000));
+    await controller.operations.use(selectedId);
+
+    await collectController(controller);
+
+    expect(usageCalls).toBe(0);
+    await controller.shutdown();
+  });
+
+  test("rejects an unsupported primer model without applying a retry cooldown", async () => {
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    const paths = resolveRouterPaths(fixture.directory);
+    let usageCalls = 0;
+    let primerCalls = 0;
+    const controller = await createRouterController({
+      paths,
+      clock: () => 2_000_000_000_000,
+      oauth: { refresh: async () => makeCredentials("account-1", 3_000_000_000_000) },
+      fetchImpl: async () => {
+        usageCalls += 1;
+        return Response.json(completeUsageResponse);
+      },
+      baseStream: () => {
+        primerCalls += 1;
+        return eventStream(successfulText());
+      },
+    });
+    const accountId = await controller.vault.addFromOAuth(
+      "work",
+      makeCredentials("account-1", 3_000_000_000_000),
+    );
+    const stateStore = createAtomicJsonStore<RuntimeStateFile>({
+      path: paths.state,
+      schema: RuntimeStateFileSchema,
+      createDefault: () => structuredClone(defaultRuntimeState),
+    });
+
+    await expect(controller.operations.prime(accountId, "unsupported-model")).rejects.toThrow(
+      "Codex model unsupported-model is unavailable for priming",
+    );
+
+    expect(usageCalls).toBe(0);
+    expect(primerCalls).toBe(0);
+    expect((await stateStore.read()).priming.retryAfter).toEqual({});
+    await controller.shutdown();
+  });
+
   test("shows the first authenticated account before the first routed turn", async () => {
     const fixture = await createStorageFixture();
     cleanups.push(fixture.cleanup);

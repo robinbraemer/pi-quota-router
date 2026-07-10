@@ -152,6 +152,66 @@ describe("AccountVault", () => {
     expect(credentials[0].accessToken).toBe(credentials[1].accessToken);
   });
 
+  test("does not overwrite credentials replaced during refresh", async () => {
+    let finishRefresh: ((credentials: ReturnType<typeof makeCredentials>) => void) | undefined;
+    let markRefreshStarted: (() => void) | undefined;
+    const refreshStarted = new Promise<void>((resolve) => {
+      markRefreshStarted = resolve;
+    });
+    const { createVault } = await setup({
+      refresh: async () => {
+        markRefreshStarted?.();
+        return await new Promise((resolve) => {
+          finishRefresh = resolve;
+        });
+      },
+    });
+    const vault = createVault();
+    const id = await vault.addFromOAuth(
+      "work",
+      makeCredentials("account-1", NOW + 60_000, "expiring"),
+    );
+
+    const refreshing = vault.getFreshCredential(id);
+    await refreshStarted;
+    const relogged = makeCredentials("account-1", NOW + 3_600_000, "relogged");
+    await vault.addFromOAuth("work", relogged);
+    finishRefresh?.(makeCredentials("account-1", NOW + 3_600_000, "stale-refresh"));
+
+    expect((await refreshing).accessToken).toBe(relogged.access);
+    expect((await vault.getFreshCredential(id)).accessToken).toBe(relogged.access);
+  });
+
+  test("does not invalidate credentials replaced during a failed refresh", async () => {
+    let failRefresh: ((error: unknown) => void) | undefined;
+    let markRefreshStarted: (() => void) | undefined;
+    const refreshStarted = new Promise<void>((resolve) => {
+      markRefreshStarted = resolve;
+    });
+    const { createVault } = await setup({
+      refresh: async () => {
+        markRefreshStarted?.();
+        return await new Promise((_resolve, reject) => {
+          failRefresh = reject;
+        });
+      },
+    });
+    const vault = createVault();
+    const id = await vault.addFromOAuth(
+      "work",
+      makeCredentials("account-1", NOW + 60_000, "expiring"),
+    );
+
+    const refreshing = vault.getFreshCredential(id);
+    await refreshStarted;
+    const relogged = makeCredentials("account-1", NOW + 3_600_000, "relogged");
+    await vault.addFromOAuth("work", relogged);
+    failRefresh?.(Object.assign(new Error("invalid_grant"), { code: "invalid_grant" }));
+
+    expect((await refreshing).accessToken).toBe(relogged.access);
+    expect(await vault.list()).toEqual([expect.objectContaining({ id, needsReauth: false })]);
+  });
+
   test("force refreshes a rejected but nominally unexpired access token", async () => {
     let refreshes = 0;
     const { createVault } = await setup({

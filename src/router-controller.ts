@@ -187,14 +187,16 @@ export async function createRouterController(
       cachedConfig = config;
       const candidates = await Promise.all(
         summaries.map(async (account): Promise<Candidate> => {
-          const snapshot = await usage
-            .get(account.id, {
-              ...(request.options?.signal ? { signal: request.options.signal } : {}),
-            })
-            .catch(() => {
-              request.options?.signal?.throwIfAborted();
-              return undefined;
-            });
+          const snapshot = config.manualAccountId
+            ? usage.peek(account.id)
+            : await usage
+                .get(account.id, {
+                  ...(request.options?.signal ? { signal: request.options.signal } : {}),
+                })
+                .catch(() => {
+                  request.options?.signal?.throwIfAborted();
+                  return undefined;
+                });
           const block = state.blocks.find((value) => value.accountId === account.id);
           return {
             accountId: account.id,
@@ -409,11 +411,15 @@ export async function createRouterController(
       if (selected.length === 0) {
         throw new Error(`No Codex account matches ${selector}`);
       }
+      const primerModelId = modelId ?? currentModelId;
+      if (!codexModelsById.has(primerModelId)) {
+        throw new Error(`Codex model ${primerModelId} is unavailable for priming`);
+      }
       const results = [];
       for (const account of selected) {
         const result = await priming.primeAccount(account.id, {
           authorization: "one-shot",
-          ...(modelId ? { modelId } : {}),
+          modelId: primerModelId,
         });
         results.push(`${account.label}: ${result.status}`);
         if (

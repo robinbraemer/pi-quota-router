@@ -119,8 +119,7 @@ export function createAccountVault(options: AccountVaultOptions): AccountVault {
         credentials = await options.oauth.refresh(account.refreshToken);
       } catch (error) {
         if (isDefinitiveAuthFailure(error)) {
-          await markNeedsReauth(options.store, id);
-          throw new AccountNeedsReauthError();
+          return invalidateRefreshSource(options.store, account);
         }
         throw new TokenRefreshTransientError();
       }
@@ -129,12 +128,10 @@ export function createAccountVault(options: AccountVaultOptions): AccountVault {
       try {
         refreshedAccountId = extractCodexAccountId(credentials.access);
       } catch {
-        await markNeedsReauth(options.store, id);
-        throw new AccountNeedsReauthError();
+        return invalidateRefreshSource(options.store, account);
       }
       if (refreshedAccountId !== account.accountId) {
-        await markNeedsReauth(options.store, id);
-        throw new AccountNeedsReauthError();
+        return invalidateRefreshSource(options.store, account);
       }
       if (
         typeof credentials.refresh !== "string" ||
@@ -147,7 +144,7 @@ export function createAccountVault(options: AccountVaultOptions): AccountVault {
       const updated = await options.store.update((file) => ({
         ...file,
         accounts: file.accounts.map((candidate) =>
-          candidate.id === id
+          candidate.id === id && isSameCredentialSource(candidate, account)
             ? {
                 ...candidate,
                 accessToken: credentials.access,
@@ -308,6 +305,43 @@ async function markNeedsReauth(
       account.id === id ? { ...account, needsReauth: true } : account,
     ),
   }));
+}
+
+async function invalidateRefreshSource(
+  store: AtomicJsonStore<AccountVaultFile>,
+  source: AccountVaultFile["accounts"][number],
+): Promise<FreshCredential> {
+  const updated = await store.update((file) => ({
+    ...file,
+    accounts: file.accounts.map((account) =>
+      account.id === source.id && isSameCredentialSource(account, source)
+        ? { ...account, needsReauth: true }
+        : account,
+    ),
+  }));
+  const current = updated.accounts.find((account) => account.id === source.id);
+  if (!current) {
+    throw new AccountNotFoundError(source.id);
+  }
+  if (!isSameCredentialSource(current, source)) {
+    return {
+      accountId: current.accountId,
+      accessToken: current.accessToken,
+      expiresAt: current.expiresAt,
+    };
+  }
+  throw new AccountNeedsReauthError();
+}
+
+function isSameCredentialSource(
+  current: AccountVaultFile["accounts"][number],
+  source: AccountVaultFile["accounts"][number],
+): boolean {
+  return (
+    current.accountId === source.accountId &&
+    current.accessToken === source.accessToken &&
+    current.refreshToken === source.refreshToken
+  );
 }
 
 async function withAccountRefreshLock<T>(
