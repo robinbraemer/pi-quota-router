@@ -468,6 +468,41 @@ describe("RouterController", () => {
     await controller.shutdown();
   });
 
+  test("force refreshes a usage 401 before routing", async () => {
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    const original = makeCredentials("account-1", 3_000_000_000_000, "original");
+    const refreshed = makeCredentials("account-1", 3_000_000_000_000, "refreshed");
+    const usageKeys: string[] = [];
+    let refreshes = 0;
+    const controller = await createRouterController({
+      paths: resolveRouterPaths(fixture.directory),
+      clock: () => 2_000_000_000_000,
+      oauth: {
+        refresh: async () => {
+          refreshes += 1;
+          return refreshed;
+        },
+      },
+      fetchImpl: async (_input, init) => {
+        const authorization = new Headers(init?.headers).get("Authorization") ?? "";
+        usageKeys.push(authorization);
+        return authorization === `Bearer ${original.access}`
+          ? new Response(null, { status: 401 })
+          : Response.json(completeUsageResponse);
+      },
+      baseStream: () => eventStream(successfulText()),
+    });
+    await controller.vault.addFromOAuth("work", original);
+
+    const events = await collectController(controller);
+
+    expect(events.at(-1)?.type).toBe("done");
+    expect(usageKeys).toEqual([`Bearer ${original.access}`, `Bearer ${refreshed.access}`]);
+    expect(refreshes).toBe(1);
+    await controller.shutdown();
+  });
+
   test("refreshes exhausted usage before deriving a quota block", async () => {
     const fixture = await createStorageFixture();
     cleanups.push(fixture.cleanup);
