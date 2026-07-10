@@ -2,6 +2,8 @@ export type QuotaRouterCommand =
   | "dashboard"
   | "status"
   | "accounts"
+  | "list"
+  | "help"
   | "login"
   | "use"
   | "refresh"
@@ -15,6 +17,8 @@ export type QuotaRouterCommand =
 const COMMANDS = new Set<QuotaRouterCommand>([
   "status",
   "accounts",
+  "list",
+  "help",
   "login",
   "use",
   "refresh",
@@ -41,7 +45,7 @@ export function parseQuotaRouterCommand(input: string): {
   const candidate = tokens[0];
   if (!candidate || !COMMANDS.has(candidate as QuotaRouterCommand)) {
     throw new CommandParseError(
-      "Unknown quota-router command. Use status, accounts, login, use, refresh, prime, policy, reset, verify, path, or log.",
+      "Unknown quota-router command. Use help, login, list, status, use, refresh, prime, policy, reset, verify, path, or log.",
     );
   }
   const command = candidate as QuotaRouterCommand;
@@ -89,7 +93,7 @@ function tokenize(input: string): string[] {
 }
 
 function validate(command: QuotaRouterCommand, args: string[]): void {
-  const maximum = command === "dashboard" ? 0 : command === "login" ? 1 : 1;
+  const maximum = command === "dashboard" || command === "help" ? 0 : 1;
   if (args.length > maximum) {
     throw new CommandParseError(`Too many arguments for ${command}`);
   }

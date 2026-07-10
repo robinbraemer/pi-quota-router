@@ -29,16 +29,19 @@ export function registerQuotaRouterCommands(
         let result: string;
         switch (parsed.command) {
           case "dashboard":
-            result = await operations.dashboard();
+          case "help":
+            result = formatQuotaRouterDashboard(await operations.dashboard());
             break;
           case "status":
             result = await operations.status();
             break;
           case "accounts":
+          case "list":
             result = await operations.accounts();
             break;
           case "login":
             result = await operations.login(parsed.args[0], ctx);
+            ctx.ui.setStatus("quota-router", await operations.status());
             break;
           case "use":
             result = await operations.use(
@@ -94,6 +97,30 @@ export function registerQuotaRouterCommands(
       }
     },
   });
+}
+
+export function formatQuotaRouterDashboard(status: string): string {
+  return [
+    status,
+    "",
+    "QUICK COMMANDS",
+    "◆ /quota-router login [label]                 Add or reauthenticate an account",
+    "◆ /quota-router list                          List managed accounts and auth state",
+    "◆ /quota-router status                        Show current routing status",
+    "◆ /quota-router use auto                      Enable quota-aware automatic routing",
+    "◆ /quota-router refresh [account|all]         Refresh credentials and quota",
+    "◆ /quota-router prime [account|all]           Confirm and initialize untouched accounts",
+    "",
+    "MORE COMMANDS",
+    "· /quota-router use <account>                 Force a managed account",
+    "· /quota-router accounts                      Alias of list",
+    "· /quota-router policy                        Show active routing policy",
+    "· /quota-router reset <scope>                 Reset runtime state",
+    "· /quota-router verify                        Validate files and permissions",
+    "· /quota-router path                          Show router data paths",
+    "· /quota-router log [on|off]                  Control diagnostic logging",
+    "· /quota-router help                          Show this command guide",
+  ].join("\n");
 }
 
 function required(value: string | undefined, message: string): string {

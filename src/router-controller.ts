@@ -271,14 +271,16 @@ export async function createRouterController(
   });
 
   const statusText = async (): Promise<string> => {
-    const config = await configStore.read();
+    const [config, accounts] = await Promise.all([configStore.read(), vault.list()]);
     cachedConfig = config;
-    const snapshot = currentAccountId ? usage.peek(currentAccountId) : undefined;
+    const displayAccountId = config.manualAccountId ?? currentAccountId ?? accounts[0]?.id;
+    const displayAccount = accounts.find((account) => account.id === displayAccountId);
+    const snapshot = displayAccountId ? usage.peek(displayAccountId) : undefined;
     return formatCompactStatus({
-      label: currentLabel,
+      label: displayAccount?.label ?? currentLabel,
       ...(snapshot ? { snapshot } : {}),
       ...(snapshot ? { urgency: weeklyUrgency(snapshot, clock()) } : {}),
-      mode: config.manualAccountId ? "manual" : currentAccountId ? "auto" : "login",
+      mode: config.manualAccountId ? "manual" : accounts.length > 0 ? "auto" : "login",
       now: clock(),
     });
   };
@@ -302,7 +304,12 @@ export async function createRouterController(
             )
             .join("\n");
     },
-    login: (label, ctx) => performCodexLogin({ ctx, ...(label ? { label } : {}), vault }),
+    async login(label, ctx) {
+      const result = await performCodexLogin({ ctx, ...(label ? { label } : {}), vault });
+      currentAccountId = result.id;
+      currentLabel = result.label;
+      return result.message;
+    },
     async use(selector) {
       if (selector === "auto") {
         cachedConfig = await configStore.update((config) => {

@@ -21,6 +21,23 @@ const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => Promise.all(cleanups.splice(0).map((cleanup) => cleanup())));
 
 describe("RouterController", () => {
+  test("shows the first authenticated account before the first routed turn", async () => {
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    const controller = await createRouterController({
+      paths: resolveRouterPaths(fixture.directory),
+      clock: () => 2_000_000_000_000,
+      oauth: { refresh: async () => makeCredentials("account-1", 3_000_000_000_000) },
+      fetchImpl: async () => Response.json(completeUsageResponse),
+      baseStream: () => eventStream(successfulText()),
+    });
+
+    await controller.vault.addFromOAuth("work", makeCredentials("account-1", 3_000_000_000_000));
+
+    expect(await controller.operations.status()).toBe("Codex · work · auto");
+    await controller.shutdown();
+  });
+
   test("routes after login and refuses to expose the bootstrap sentinel", async () => {
     const fixture = await createStorageFixture();
     cleanups.push(fixture.cleanup);

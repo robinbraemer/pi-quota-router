@@ -41,6 +41,8 @@ Open normal Pi and add each Codex account with a distinct label:
 
 Each `login` opens Pi's normal OpenAI Codex OAuth flow. The router keeps its own multi-account vault and does not rewrite Pi's `auth.json`.
 
+When the authorization URL is ready, Pi shows an explicit action selector: open it in the default browser, copy it to the clipboard, or continue manually. The full URL always remains visible, including when a browser, clipboard, or interactive selector is unavailable. After credentials are saved, the footer rerenders immediately with the account label; it does not wait for a later agent turn.
+
 After at least one account has a weekly reset timestamp, ordinary Codex prompts route automatically. The model id, capabilities, and selected thinking level are passed through unchanged.
 
 ## How automatic selection works
@@ -89,8 +91,10 @@ Confirmed automatic priming is off by default. Once enabled, idle sweeps process
 
 | Command | Purpose |
 | --- | --- |
-| `/quota-router` | Show the compact dashboard/status. |
+| `/quota-router` | Show current status plus the highlighted quick-command guide. |
+| `/quota-router help` | Show the same discoverable command guide. |
 | `/quota-router status` | Show the current compact routing status. |
+| `/quota-router list` | List managed ids, labels, and reauthentication state. |
 | `/quota-router accounts` | List managed ids, labels, and reauthentication state. |
 | `/quota-router login [label]` | Add or reauthenticate a Codex account through Pi OAuth. |
 | `/quota-router use <account-or-label>` | Force a specific account, including below automatic headroom floors. |

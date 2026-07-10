@@ -19,6 +19,8 @@ Start with:
 | Footer ends in `login` | No account has completed login; run `/quota-router login`. |
 | Footer contains `?` | Run `/quota-router refresh all`; the weekly clock may genuinely be absent on an untouched account. |
 | Account says `reauth required` | Run `/quota-router login <same-label>` with that Codex identity. A successful duplicate login replaces the saved credentials. |
+| Browser or clipboard authorization action fails | Use the authorization URL printed above the selector. The URL is always preserved as a manual fallback. |
+| Footer still shows `none · login` after successful login | Run `/quota-router list` to confirm the account, then `/quota-router status`. Current versions rerender immediately; update the Git package if the stale footer persists. |
 | `no_eligible_accounts` | Refresh usage, inspect policy/headroom, prime confirmed untouched accounts, or wait for cooldowns. A deliberate `/quota-router use <account>` can bypass automatic headroom. |
 | `manual_account_unavailable` | Reauthenticate/clear the account's block, wait for its reservation, or run `/quota-router use auto`. |
 | `not_authorized` from prime | Invoke `/quota-router prime ...` interactively and accept both confirmations. |

@@ -7,6 +7,8 @@ describe("quota-router command parser", () => {
     for (const command of [
       "status",
       "accounts",
+      "list",
+      "help",
       "login",
       "use",
       "refresh",
