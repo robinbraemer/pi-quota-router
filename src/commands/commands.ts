@@ -8,7 +8,7 @@ export interface QuotaRouterOperations {
   login(label: string | undefined, ctx: ExtensionCommandContext): Promise<string>;
   use(selector: string): Promise<string>;
   refresh(selector?: string): Promise<string>;
-  prime(selector?: string): Promise<string>;
+  prime(selector?: string, modelId?: string): Promise<string>;
   policy(): Promise<string>;
   reset(scope: string): Promise<string>;
   verify(): Promise<string>;
@@ -63,7 +63,7 @@ export function registerQuotaRouterCommands(
               ctx.ui.notify("Priming cancelled; no quota was spent.", "warning");
               return;
             }
-            result = await operations.prime(parsed.args[0]);
+            result = await operations.prime(parsed.args[0], ctx.model?.id);
             break;
           }
           case "policy":

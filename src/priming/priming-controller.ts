@@ -42,7 +42,10 @@ export interface PrimingControllerOptions {
 }
 
 export interface PrimingController {
-  primeAccount(accountId: string, options?: { authorization: "one-shot" }): Promise<PrimerResult>;
+  primeAccount(
+    accountId: string,
+    options?: { authorization: "one-shot"; modelId?: string },
+  ): Promise<PrimerResult>;
   setForegroundActive(active: boolean): void;
   scheduleSweep(reason: "startup" | "manual" | "idle"): void;
   shutdown(): Promise<void>;
@@ -59,7 +62,7 @@ export function createPrimingController(options: PrimingControllerOptions): Prim
 
   const primeAccount = async (
     accountId: string,
-    invocation?: { authorization: "one-shot" },
+    invocation?: { authorization: "one-shot"; modelId?: string },
   ): Promise<PrimerResult> => {
     const config = options.config();
     if (!isPrimingAuthorized(config) && invocation?.authorization !== "one-shot") {
@@ -85,6 +88,10 @@ export function createPrimingController(options: PrimingControllerOptions): Prim
     );
     if (!sweep) {
       return { status: "reserved" };
+    }
+    if (foregroundActive) {
+      await options.reservations.release(sweep.leaseToken);
+      return { status: "busy" };
     }
 
     let accountLease: Reservation | undefined;
@@ -121,7 +128,7 @@ export function createPrimingController(options: PrimingControllerOptions): Prim
       await options.executePrimer(
         {
           accountId,
-          modelId: options.currentModelId(),
+          modelId: invocation?.modelId ?? options.currentModelId(),
           prompt: ".",
           messages: [],
           tools: [],

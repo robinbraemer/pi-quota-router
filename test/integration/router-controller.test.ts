@@ -91,6 +91,94 @@ describe("RouterController", () => {
     await controller.shutdown();
   });
 
+  test("force refreshes a credential after a usage 401", async () => {
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    const original = makeCredentials("account-1", 3_000_000_000_000, "original");
+    const refreshed = makeCredentials("account-1", 3_000_000_000_000, "refreshed");
+    const authorizationHeaders: string[] = [];
+    let refreshes = 0;
+    const controller = await createRouterController({
+      paths: resolveRouterPaths(fixture.directory),
+      clock: () => 2_000_000_000_000,
+      oauth: {
+        refresh: async () => {
+          refreshes += 1;
+          return refreshed;
+        },
+      },
+      fetchImpl: async (_input, init) => {
+        authorizationHeaders.push(String(new Headers(init?.headers).get("authorization")));
+        return authorizationHeaders.length === 1
+          ? new Response(null, { status: 401 })
+          : Response.json(completeUsageResponse);
+      },
+      baseStream: () => eventStream(successfulText()),
+    });
+    const accountId = await controller.vault.addFromOAuth("work", original);
+
+    await controller.operations.refresh(accountId);
+
+    expect(authorizationHeaders).toEqual([
+      `Bearer ${original.access}`,
+      `Bearer ${refreshed.access}`,
+    ]);
+    expect(refreshes).toBe(1);
+    await controller.shutdown();
+  });
+
+  test("marks an account for reauthentication after a refreshed usage credential is rejected", async () => {
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    const original = makeCredentials("account-1", 3_000_000_000_000, "original");
+    const refreshed = makeCredentials("account-1", 3_000_000_000_000, "refreshed");
+    const controller = await createRouterController({
+      paths: resolveRouterPaths(fixture.directory),
+      clock: () => 2_000_000_000_000,
+      oauth: { refresh: async () => refreshed },
+      fetchImpl: async () => new Response(null, { status: 401 }),
+      baseStream: () => eventStream(successfulText()),
+    });
+    const accountId = await controller.vault.addFromOAuth("work", original);
+
+    await expect(controller.operations.refresh(accountId)).rejects.toThrow(
+      "must be authenticated again",
+    );
+
+    expect((await controller.vault.list())[0]?.needsReauth).toBe(true);
+    await controller.shutdown();
+  });
+
+  test("rejects an ambiguous label for manual routing", async () => {
+    const controller = await setupDuplicateLabels();
+
+    await expect(controller.operations.use("shared")).rejects.toThrow(
+      "Ambiguous Codex account label: shared",
+    );
+
+    await controller.shutdown();
+  });
+
+  test("rejects an ambiguous label for refresh", async () => {
+    const controller = await setupDuplicateLabels();
+
+    await expect(controller.operations.refresh("shared")).rejects.toThrow(
+      "Ambiguous Codex account label: shared",
+    );
+
+    await controller.shutdown();
+  });
+
+  test("rejects an ambiguous label for priming", async () => {
+    const controller = await setupDuplicateLabels();
+
+    await expect(controller.operations.prime("shared")).rejects.toThrow(
+      "Ambiguous Codex account label: shared",
+    );
+
+    await controller.shutdown();
+  });
+
   test("shows the first authenticated account before the first routed turn", async () => {
     const fixture = await createStorageFixture();
     cleanups.push(fixture.cleanup);
@@ -480,4 +568,19 @@ async function collectController(controller: Awaited<ReturnType<typeof createRou
     events.push(event);
   }
   return events;
+}
+
+async function setupDuplicateLabels() {
+  const fixture = await createStorageFixture();
+  cleanups.push(fixture.cleanup);
+  const controller = await createRouterController({
+    paths: resolveRouterPaths(fixture.directory),
+    clock: () => 2_000_000_000_000,
+    oauth: { refresh: async () => makeCredentials("account-1", 3_000_000_000_000) },
+    fetchImpl: async () => Response.json(completeUsageResponse),
+    baseStream: () => eventStream(successfulText()),
+  });
+  await controller.vault.addFromOAuth("shared", makeCredentials("account-1", 3_000_000_000_000));
+  await controller.vault.addFromOAuth("shared", makeCredentials("account-2", 3_000_000_000_000));
+  return controller;
 }

@@ -6,7 +6,7 @@ import type {
   ThinkingLevel,
 } from "@earendil-works/pi-ai";
 import type { AccountVault, CodexOAuthClient } from "./accounts/account-vault.ts";
-import { createAccountVault } from "./accounts/account-vault.ts";
+import { AccountNeedsReauthError, createAccountVault } from "./accounts/account-vault.ts";
 import { codexModels, codexModelsById } from "./codex-runtime.ts";
 import type { QuotaRouterOperations } from "./commands/commands.ts";
 import { type CodexLoginImplementation, performCodexLogin } from "./commands/login.ts";
@@ -33,7 +33,11 @@ import {
 } from "./storage/schemas.ts";
 import { createRoutedStream } from "./stream/routed-stream.ts";
 import type { Candidate, RouterConfig } from "./types.ts";
-import { type FetchImplementation, fetchCodexUsage } from "./usage/codex-usage.ts";
+import {
+  CodexUsageHttpError,
+  type FetchImplementation,
+  fetchCodexUsage,
+} from "./usage/codex-usage.ts";
 import { createUsageService } from "./usage/usage-service.ts";
 
 export interface RouterController extends ProviderController {
@@ -82,20 +86,39 @@ export async function createRouterController(
   });
   const reservations = createReservationStore(stateStore);
   const eventLog = createEventLog({ path: options.paths.log });
-  const usage = createUsageService({
-    clock,
-    freshnessMs: () => cachedConfig.usageFreshnessMs,
-    fetchUsage: async (accountId, signal) => {
-      const credential = await vault.getFreshCredential(accountId, signal);
-      return fetchCodexUsage({
-        accessToken: credential.accessToken,
-        accountId: credential.accountId,
+  const fetchUsage = async (accountId: string, signal?: AbortSignal) => {
+    const request = (accessToken: string, codexAccountId: string) =>
+      fetchCodexUsage({
+        accessToken,
+        accountId: codexAccountId,
         managedAccountId: accountId,
         ...(signal ? { signal } : {}),
         ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
         clock,
       });
-    },
+    const credential = await vault.getFreshCredential(accountId, signal);
+    try {
+      return await request(credential.accessToken, credential.accountId);
+    } catch (error) {
+      if (!(error instanceof CodexUsageHttpError) || error.status !== 401) {
+        throw error;
+      }
+    }
+    const refreshed = await vault.forceRefreshCredential(accountId, credential.accessToken, signal);
+    try {
+      return await request(refreshed.accessToken, refreshed.accountId);
+    } catch (error) {
+      if (error instanceof CodexUsageHttpError && error.status === 401) {
+        await vault.markNeedsReauth(accountId, "revoked");
+        throw new AccountNeedsReauthError();
+      }
+      throw error;
+    }
+  };
+  const usage = createUsageService({
+    clock,
+    freshnessMs: () => cachedConfig.usageFreshnessMs,
+    fetchUsage,
   });
   let currentAccountId: string | undefined;
   let currentLabel = "none";
@@ -291,9 +314,24 @@ export async function createRouterController(
     });
   };
 
-  const resolveAccount = async (selector: string) => {
+  const resolveAccounts = async (selector: string, allowAll: boolean) => {
     const accounts = await vault.list();
-    return accounts.find((account) => account.id === selector || account.label === selector);
+    if (allowAll && selector === "all") {
+      return accounts;
+    }
+    const exact = accounts.find((account) => account.id === selector);
+    if (exact) {
+      return [exact];
+    }
+    const matches = accounts.filter((account) => account.label === selector);
+    if (matches.length > 1) {
+      throw new Error(
+        `Ambiguous Codex account label: ${selector}. Use a managed account id: ${matches
+          .map((account) => account.id)
+          .join(", ")}`,
+      );
+    }
+    return matches;
   };
 
   const operations: QuotaRouterOperations = {
@@ -335,7 +373,7 @@ export async function createRouterController(
         });
         return "Routing returned to automatic quota-aware selection.";
       }
-      const account = await resolveAccount(selector);
+      const account = (await resolveAccounts(selector, false))[0];
       if (!account) {
         throw new Error(`Unknown Codex account: ${selector}`);
       }
@@ -346,11 +384,7 @@ export async function createRouterController(
       return `Manual routing set to ${account.label} (${account.id}).`;
     },
     async refresh(selector = "all") {
-      const accounts = await vault.list();
-      const selected =
-        selector === "all"
-          ? accounts
-          : accounts.filter((account) => account.id === selector || account.label === selector);
+      const selected = await resolveAccounts(selector, true);
       if (selected.length === 0) {
         throw new Error(`No Codex account matches ${selector}`);
       }
@@ -370,18 +404,17 @@ export async function createRouterController(
       }
       return `Refreshed ${selected.length} Codex account${selected.length === 1 ? "" : "s"}.`;
     },
-    async prime(selector = "all") {
-      const accounts = await vault.list();
-      const selected =
-        selector === "all"
-          ? accounts
-          : accounts.filter((account) => account.id === selector || account.label === selector);
+    async prime(selector = "all", modelId) {
+      const selected = await resolveAccounts(selector, true);
       if (selected.length === 0) {
         throw new Error(`No Codex account matches ${selector}`);
       }
       const results = [];
       for (const account of selected) {
-        const result = await priming.primeAccount(account.id, { authorization: "one-shot" });
+        const result = await priming.primeAccount(account.id, {
+          authorization: "one-shot",
+          ...(modelId ? { modelId } : {}),
+        });
         results.push(`${account.label}: ${result.status}`);
         if (
           result.status === "confirmed" ||

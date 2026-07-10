@@ -151,6 +151,35 @@ describe("/quota-router commands", () => {
     expect(calls).toEqual(["prime:work"]);
   });
 
+  test("primes with the model selected in the command context", async () => {
+    let handler: ((args: string, ctx: ExtensionCommandContext) => Promise<void>) | undefined;
+    const calls: string[] = [];
+    const pi = {
+      registerCommand: (_name: string, options: { handler: typeof handler }) => {
+        handler = options.handler;
+      },
+    } as unknown as ExtensionAPI;
+    const operations = {
+      prime: async (selector?: string, modelId?: string) => {
+        calls.push(`${selector}:${modelId}`);
+        return "work: confirmed";
+      },
+    } as unknown as QuotaRouterOperations;
+    const ctx = {
+      model: { id: "gpt-selected" },
+      ui: {
+        notify: () => undefined,
+        confirm: async () => true,
+      },
+    } as unknown as ExtensionCommandContext;
+    registerQuotaRouterCommands(pi, operations);
+    if (!handler) throw new Error("command was not registered");
+
+    await handler("prime work", ctx);
+
+    expect(calls).toEqual(["work:gpt-selected"]);
+  });
+
   test("rerenders the footer immediately after a successful login", async () => {
     let handler: ((args: string, ctx: ExtensionCommandContext) => Promise<void>) | undefined;
     const events: string[] = [];

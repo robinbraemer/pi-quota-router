@@ -4,7 +4,10 @@ import {
   createPrimingController,
   type PrimerRequest,
 } from "../../src/priming/priming-controller.ts";
-import { createReservationStore } from "../../src/routing/reservation-store.ts";
+import {
+  createReservationStore,
+  type ReservationStore,
+} from "../../src/routing/reservation-store.ts";
 import { createAtomicJsonStore } from "../../src/storage/atomic-json-store.ts";
 import {
   defaultRuntimeState,
@@ -43,6 +46,7 @@ async function setup(options?: {
   onBackgroundError?: (error: unknown) => void;
   reservationTtlMs?: number;
   clock?: () => number;
+  wrapReservations?: (reservations: ReservationStore) => ReservationStore;
 }) {
   const fixture = await createStorageFixture();
   cleanups.push(fixture.cleanup);
@@ -64,7 +68,8 @@ async function setup(options?: {
       },
     }),
     stateStore: store,
-    reservations: createReservationStore(store),
+    reservations:
+      options?.wrapReservations?.(createReservationStore(store)) ?? createReservationStore(store),
     usage: {
       get: async () => {
         reads += 1;
@@ -149,6 +154,50 @@ describe("PrimingController", () => {
     controller.setForegroundActive(true);
     expect(await controller.primeAccount("a")).toEqual({ status: "busy" });
     expect(requests).toHaveLength(0);
+  });
+
+  test("stops after foreground work begins while acquiring the sweep", async () => {
+    let markAcquireStarted: () => void = () => undefined;
+    const acquireStarted = new Promise<void>((resolve) => {
+      markAcquireStarted = resolve;
+    });
+    let finishAcquire: () => void = () => undefined;
+    const acquireHeld = new Promise<void>((resolve) => {
+      finishAcquire = resolve;
+    });
+    const { controller, requests, store } = await setup({
+      authorized: true,
+      wrapReservations: (reservations) => ({
+        ...reservations,
+        async acquirePrimerSweep(owner, now, ttlMs) {
+          markAcquireStarted();
+          await acquireHeld;
+          return reservations.acquirePrimerSweep(owner, now, ttlMs);
+        },
+      }),
+    });
+
+    const result = controller.primeAccount("a");
+    await acquireStarted;
+    controller.setForegroundActive(true);
+    finishAcquire();
+
+    expect(await result).toEqual({ status: "busy" });
+    expect(requests).toHaveLength(0);
+    expect((await store.read()).reservations).toEqual([]);
+  });
+
+  test("uses the model authorized for the one-shot invocation", async () => {
+    const { controller, requests } = await setup({
+      refreshed: untouched(NOW + 604_800_000),
+    });
+
+    await controller.primeAccount("a", {
+      authorization: "one-shot",
+      modelId: "gpt-invocation",
+    });
+
+    expect(requests[0]?.modelId).toBe("gpt-invocation");
   });
 
   test("applies the sweep limit to primer attempts instead of account positions", async () => {
