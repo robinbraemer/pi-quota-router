@@ -50,13 +50,15 @@ export function createUsageService(options: UsageServiceOptions): UsageService {
 
       const pending = inflight.get(accountId);
       if (pending) {
-        return pending;
+        return awaitWithSignal(pending, getOptions.signal);
       }
 
+      getOptions.signal?.throwIfAborted();
+
       const request = (async () => {
-        const release = await gate.acquire(getOptions.signal);
+        const release = await gate.acquire();
         try {
-          const fresh = await options.fetchUsage(accountId, getOptions.signal);
+          const fresh = await options.fetchUsage(accountId);
           const normalized = fresh.stale ? { ...fresh, stale: false } : fresh;
           cache.set(accountId, normalized);
           return normalized;
@@ -75,7 +77,7 @@ export function createUsageService(options: UsageServiceOptions): UsageService {
         }
       });
       inflight.set(accountId, request);
-      return request;
+      return awaitWithSignal(request, getOptions.signal);
     },
 
     peek(accountId) {
@@ -86,6 +88,27 @@ export function createUsageService(options: UsageServiceOptions): UsageService {
       cache.delete(accountId);
     },
   };
+}
+
+function awaitWithSignal<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) {
+    return promise;
+  }
+  signal.throwIfAborted();
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    );
+  });
 }
 
 function createConcurrencyGate(maximum: number) {

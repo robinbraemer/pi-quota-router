@@ -24,6 +24,8 @@ export class NoRecoverableAccountError extends Error {
 export interface WaitForRecoveryOptions {
   stateStore: AtomicJsonStore<RuntimeStateFile>;
   accountIds?: readonly string[];
+  knownAccountIds?: readonly string[];
+  listAccountIds?: () => Promise<readonly string[]>;
   clock: () => number;
   sleep?: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
   signal?: AbortSignal;
@@ -45,6 +47,12 @@ export async function waitForRecovery(options: WaitForRecoveryOptions): Promise<
     const now = options.clock();
     if (now >= deadline) {
       throw new RecoveryWaitTimeoutError();
+    }
+    if (options.knownAccountIds && options.listAccountIds) {
+      const knownAccountIds = new Set(options.knownAccountIds);
+      if ((await options.listAccountIds()).some((accountId) => !knownAccountIds.has(accountId))) {
+        return;
+      }
     }
     const state = await options.stateStore.read();
     const accountIds = options.accountIds ? new Set(options.accountIds) : undefined;

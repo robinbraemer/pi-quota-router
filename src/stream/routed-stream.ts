@@ -32,6 +32,7 @@ export type RouteSelection =
       kind: "unavailable";
       reason: string;
       recoverableAccountIds: string[];
+      knownAccountIds: string[];
     };
 
 export interface RoutedStreamDependencies {
@@ -47,7 +48,11 @@ export interface RoutedStreamDependencies {
   recordFailure(accountId: string, failure: FailureClass): Promise<void>;
   release(leaseToken: string): Promise<void>;
   renew(leaseToken: string, ttlMs: number): Promise<boolean>;
-  waitForRecovery(accountIds: readonly string[], signal?: AbortSignal): Promise<void>;
+  waitForRecovery(
+    accountIds: readonly string[],
+    knownAccountIds: readonly string[],
+    signal?: AbortSignal,
+  ): Promise<void>;
   maxAttempts(): number;
 }
 
@@ -82,7 +87,11 @@ export function createRoutedStream(
             lastFailure = new RouteUnavailableError(selection.reason);
             break;
           }
-          await dependencies.waitForRecovery(selection.recoverableAccountIds, options?.signal);
+          await dependencies.waitForRecovery(
+            selection.recoverableAccountIds,
+            selection.knownAccountIds,
+            options?.signal,
+          );
           excludedAccountIds.clear();
           continue;
         }

@@ -10,6 +10,25 @@ const COPY_ACTION = "Copy authorization URL";
 const MANUAL_ACTION = "Continue manually (URL shown above)";
 
 describe("Codex command login", () => {
+  test("saves completed OAuth credentials while the handoff selector remains open", async () => {
+    let resolveSelection: ((selection: string | undefined) => void) | undefined;
+    const selection = new Promise<string | undefined>((resolve) => {
+      resolveSelection = resolve;
+    });
+    const setup = loginFixture(selection);
+
+    const result = await Promise.race([
+      performCodexLogin(setup.options),
+      Bun.sleep(100).then(() => {
+        throw new Error("login waited for authorization selector");
+      }),
+    ]);
+
+    expect(result.id).toBe("codex-a");
+    expect(setup.added).toHaveLength(1);
+    resolveSelection?.(MANUAL_ACTION);
+  });
+
   test("opens the authorization URL selected by the user", async () => {
     const opened: string[] = [];
     const copied: string[] = [];
@@ -104,7 +123,7 @@ describe("Codex command login", () => {
   });
 });
 
-function loginFixture(selection: string | undefined | Error) {
+function loginFixture(selection: string | undefined | Error | Promise<string | undefined>) {
   const notices: string[] = [];
   const noticeTypes: Array<string | undefined> = [];
   const selections: Array<{ title: string; options: string[] }> = [];
@@ -118,7 +137,7 @@ function loginFixture(selection: string | undefined | Error) {
       select: async (title: string, options: string[]) => {
         selections.push({ title, options });
         if (selection instanceof Error) throw selection;
-        return selection;
+        return await selection;
       },
       input: async () => "manual-code",
     },

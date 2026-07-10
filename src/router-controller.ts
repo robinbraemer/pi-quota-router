@@ -9,13 +9,13 @@ import type { AccountVault, CodexOAuthClient } from "./accounts/account-vault.ts
 import { createAccountVault } from "./accounts/account-vault.ts";
 import { codexModels, codexModelsById } from "./codex-runtime.ts";
 import type { QuotaRouterOperations } from "./commands/commands.ts";
-import { performCodexLogin } from "./commands/login.ts";
+import { type CodexLoginImplementation, performCodexLogin } from "./commands/login.ts";
 import { defaultConfig } from "./config.ts";
 import { createEventLog } from "./logging/event-log.ts";
 import { createPrimingController } from "./priming/priming-controller.ts";
 import type { ProviderController } from "./provider.ts";
 import { classifyFailure, type FailureClass } from "./recovery/failure-classifier.ts";
-import { blockFromFailure } from "./recovery/recovery-state.ts";
+import { blockFromFailure, reconcileUsageBlock } from "./recovery/recovery-state.ts";
 import { waitForRecovery } from "./recovery/wait-for-recovery.ts";
 import { createReservationStore } from "./routing/reservation-store.ts";
 import { selectAndReserve } from "./routing/select-and-reserve.ts";
@@ -49,6 +49,7 @@ export interface RouterControllerOptions {
   paths: RouterPaths;
   clock?: () => number;
   oauth: CodexOAuthClient;
+  login?: CodexLoginImplementation;
   fetchImpl?: FetchImplementation;
   baseStream: StreamFunction<"openai-codex-responses", SimpleStreamOptions>;
 }
@@ -225,6 +226,7 @@ export async function createRouterController(
         kind: "unavailable",
         reason: selected.decision.reason,
         recoverableAccountIds: selected.recoverableAccountIds,
+        knownAccountIds: summaries.map((account) => account.id),
       };
     },
     getFreshCredential: (accountId, signal) => vault.getFreshCredential(accountId, signal),
@@ -259,11 +261,13 @@ export async function createRouterController(
     },
     release: (leaseToken) => reservations.release(leaseToken).then(() => undefined),
     renew: (leaseToken, ttlMs) => reservations.renew(leaseToken, clock(), ttlMs),
-    waitForRecovery: (accountIds, signal) =>
+    waitForRecovery: (accountIds, knownAccountIds, signal) =>
       waitForRecovery({
         stateStore,
         clock,
         accountIds,
+        knownAccountIds,
+        listAccountIds: async () => (await vault.list()).map((account) => account.id),
         maxWaitMs: cachedConfig.maxRecoveryWaitMs,
         ...(signal ? { signal } : {}),
       }),
@@ -305,7 +309,18 @@ export async function createRouterController(
             .join("\n");
     },
     async login(label, ctx) {
-      const result = await performCodexLogin({ ctx, ...(label ? { label } : {}), vault });
+      const result = await performCodexLogin({
+        ctx,
+        ...(label ? { label } : {}),
+        vault,
+        ...(options.login ? { login: options.login } : {}),
+      });
+      await stateStore.update((state) => ({
+        ...state,
+        blocks: state.blocks.filter(
+          (block) => block.accountId !== result.id || block.kind !== "auth",
+        ),
+      }));
       currentAccountId = result.id;
       currentLabel = result.label;
       return result.message;
@@ -339,7 +354,17 @@ export async function createRouterController(
       }
       for (const account of selected) {
         await vault.getFreshCredential(account.id);
-        await usage.get(account.id, { force: true });
+        const snapshot = await usage.get(account.id, { force: true });
+        await stateStore.update((state) => ({
+          ...state,
+          blocks: state.blocks.flatMap((block) => {
+            if (block.accountId !== account.id) {
+              return [block];
+            }
+            const reconciled = reconcileUsageBlock(block, snapshot, clock());
+            return reconciled ? [reconciled] : [];
+          }),
+        }));
       }
       return `Refreshed ${selected.length} Codex account${selected.length === 1 ? "" : "s"}.`;
     },

@@ -39,6 +39,28 @@ async function setup(retryAt: number) {
 }
 
 describe("waitForRecovery", () => {
+  test("wakes when a peer adds an account outside the unavailable pool", async () => {
+    let now = START;
+    const store = await setup(START + 3_600_000);
+    let accountIds = ["a"];
+    let sleeps = 0;
+
+    await waitForRecovery({
+      stateStore: store,
+      accountIds: ["a"],
+      knownAccountIds: ["a"],
+      listAccountIds: async () => accountIds,
+      clock: () => now,
+      sleep: async (milliseconds) => {
+        now += milliseconds;
+        sleeps += 1;
+        accountIds = ["a", "b"];
+      },
+    });
+
+    expect(sleeps).toBe(1);
+  });
+
   test("rechecks persisted state and wakes when a peer clears it", async () => {
     let now = START;
     const store = await setup(START + 3_600_000);

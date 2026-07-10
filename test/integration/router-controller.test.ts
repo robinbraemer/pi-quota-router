@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { chmod } from "node:fs/promises";
 import type { AssistantMessageEvent, Context, Model } from "@earendil-works/pi-ai";
 import { OPENAI_CODEX_MODELS } from "@earendil-works/pi-ai/providers/openai-codex.models";
+import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { createRouterController } from "../../src/router-controller.ts";
 import { createAtomicJsonStore } from "../../src/storage/atomic-json-store.ts";
 import { resolveRouterPaths } from "../../src/storage/paths.ts";
@@ -21,6 +22,75 @@ const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => Promise.all(cleanups.splice(0).map((cleanup) => cleanup())));
 
 describe("RouterController", () => {
+  test("successful reauthentication clears a permanent auth block", async () => {
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    const paths = resolveRouterPaths(fixture.directory);
+    const credentials = makeCredentials("account-1", 3_000_000_000_000);
+    const controller = await createRouterController({
+      paths,
+      clock: () => 2_000_000_000_000,
+      oauth: { refresh: async () => credentials },
+      login: async () => credentials,
+      fetchImpl: async () => Response.json(completeUsageResponse),
+      baseStream: () => eventStream(successfulText()),
+    });
+    const accountId = await controller.vault.addFromOAuth("work", credentials);
+    await controller.vault.markNeedsReauth(accountId, "invalid_grant");
+    const stateStore = createAtomicJsonStore<RuntimeStateFile>({
+      path: paths.state,
+      schema: RuntimeStateFileSchema,
+      createDefault: () => structuredClone(defaultRuntimeState),
+    });
+    await stateStore.update((state) => ({
+      ...state,
+      blocks: [{ accountId, kind: "auth", blockedAt: 2_000_000_000_000, estimated: false }],
+    }));
+
+    await controller.operations.login("work", { ui: {} } as ExtensionCommandContext);
+
+    expect((await controller.vault.list())[0]?.needsReauth).toBe(false);
+    expect((await stateStore.read()).blocks).toEqual([]);
+    await controller.shutdown();
+  });
+
+  test("forced usage refresh clears an estimated block when quota is available", async () => {
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    const paths = resolveRouterPaths(fixture.directory);
+    const credentials = makeCredentials("account-1", 3_000_000_000_000);
+    const controller = await createRouterController({
+      paths,
+      clock: () => 2_000_000_000_000,
+      oauth: { refresh: async () => credentials },
+      fetchImpl: async () => Response.json(completeUsageResponse),
+      baseStream: () => eventStream(successfulText()),
+    });
+    const accountId = await controller.vault.addFromOAuth("work", credentials);
+    const stateStore = createAtomicJsonStore<RuntimeStateFile>({
+      path: paths.state,
+      schema: RuntimeStateFileSchema,
+      createDefault: () => structuredClone(defaultRuntimeState),
+    });
+    await stateStore.update((state) => ({
+      ...state,
+      blocks: [
+        {
+          accountId,
+          kind: "transient",
+          blockedAt: 2_000_000_000_000,
+          retryAt: 2_000_003_600_000,
+          estimated: true,
+        },
+      ],
+    }));
+
+    await controller.operations.refresh(accountId);
+
+    expect((await stateStore.read()).blocks).toEqual([]);
+    await controller.shutdown();
+  });
+
   test("shows the first authenticated account before the first routed turn", async () => {
     const fixture = await createStorageFixture();
     cleanups.push(fixture.cleanup);

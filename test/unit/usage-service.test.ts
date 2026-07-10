@@ -13,6 +13,49 @@ function snapshot(accountId: string, observedAt: number): UsageSnapshot {
 }
 
 describe("UsageService", () => {
+  test("keeps a shared refresh alive when its first caller aborts", async () => {
+    const firstCaller = new AbortController();
+    let resolveFetch: ((value: UsageSnapshot) => void) | undefined;
+    let receivedSignal: AbortSignal | undefined;
+    let markFetchStarted: (() => void) | undefined;
+    const fetchStarted = new Promise<void>((resolve) => {
+      markFetchStarted = resolve;
+    });
+    const service = createUsageService({
+      clock: () => 1,
+      jitterMs: () => 0,
+      fetchUsage: (_accountId, signal) => {
+        receivedSignal = signal;
+        markFetchStarted?.();
+        return new Promise<UsageSnapshot>((resolve, reject) => {
+          resolveFetch = resolve;
+          signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+        });
+      },
+    });
+
+    const first = service.get("a", { signal: firstCaller.signal });
+    const second = service.get("a");
+    const firstOutcome = first.then(
+      (value) => ({ value }),
+      (error: unknown) => ({ error }),
+    );
+    const secondOutcome = second.then(
+      (value) => ({ value }),
+      (error: unknown) => ({ error }),
+    );
+    await fetchStarted;
+    firstCaller.abort(new Error("first caller cancelled"));
+
+    const cancelled = await firstOutcome;
+    expect("error" in cancelled ? cancelled.error : undefined).toEqual(
+      new Error("first caller cancelled"),
+    );
+    resolveFetch?.(snapshot("a", 1));
+    expect(await secondOutcome).toEqual({ value: snapshot("a", 1) });
+    expect(receivedSignal).toBeUndefined();
+  });
+
   test("coalesces refreshes and serves a five-minute fresh value", async () => {
     let now = 1_000_000;
     let calls = 0;

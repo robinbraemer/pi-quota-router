@@ -365,6 +365,7 @@ function routedDependencies(baseStream: RoutedStreamDependencies["baseStream"]):
             kind: "unavailable",
             reason: "no_eligible_accounts",
             recoverableAccountIds: [],
+            knownAccountIds: accounts,
           };
         }
         selected.push(accountId);

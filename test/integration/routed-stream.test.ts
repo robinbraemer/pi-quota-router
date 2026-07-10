@@ -42,7 +42,12 @@ function dependencies(accounts: string[], baseStream: RoutedStreamDependencies["
     selectAndReserve: async ({ excludedAccountIds }) => {
       const accountId = accounts.find((account) => !excludedAccountIds.has(account));
       if (!accountId) {
-        return { kind: "unavailable", reason: "no_eligible_accounts", recoverableAccountIds: [] };
+        return {
+          kind: "unavailable",
+          reason: "no_eligible_accounts",
+          recoverableAccountIds: [],
+          knownAccountIds: accounts,
+        };
       }
       selected.push(accountId);
       return {
