@@ -192,21 +192,31 @@ describe("PrimingController", () => {
   });
 
   test("renews primer leases for the full primer request", async () => {
+    let finishPrimer: () => void = () => undefined;
+    const primerHeld = new Promise<void>((resolve) => {
+      finishPrimer = resolve;
+    });
     const { controller, store } = await setup({
       authorized: true,
-      reservationTtlMs: 60,
+      reservationTtlMs: 600,
       clock: Date.now,
-      execute: async () => {
-        await Bun.sleep(140);
-      },
+      execute: async () => primerHeld,
     });
 
     const result = controller.primeAccount("a");
-    await Bun.sleep(100);
-    const reservations = (await store.read()).reservations;
+    await waitUntilAsync(async () => (await store.read()).reservations.length === 2);
+    const initialExpiry = Math.max(
+      ...(await store.read()).reservations.map((reservation) => reservation.expiresAt),
+    );
+    await waitUntilAsync(async () => {
+      const reservations = (await store.read()).reservations;
+      return (
+        reservations.length === 2 &&
+        reservations.every((reservation) => reservation.expiresAt > initialExpiry)
+      );
+    });
 
-    expect(reservations).toHaveLength(2);
-    expect(reservations.every((reservation) => reservation.expiresAt > Date.now())).toBeTrue();
+    finishPrimer();
     await result;
     expect((await store.read()).reservations).toEqual([]);
   });
@@ -218,6 +228,16 @@ async function waitUntil(predicate: () => boolean): Promise<void> {
       return;
     }
     await Bun.sleep(2);
+  }
+  throw new Error("condition was not reached");
+}
+
+async function waitUntilAsync(predicate: () => Promise<boolean>): Promise<void> {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    if (await predicate()) {
+      return;
+    }
+    await Bun.sleep(10);
   }
   throw new Error("condition was not reached");
 }
