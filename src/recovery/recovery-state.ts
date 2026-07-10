@@ -32,7 +32,7 @@ export function blockFromFailure(
     };
   }
 
-  const observedReset = earliestExhaustedReset(usage, now);
+  const observedReset = latestExhaustedReset(usage, now);
   const explicitReset = failure.kind === "quota" ? failure.retryAt : undefined;
   const retryAt = explicitReset ?? observedReset ?? now + DEFAULT_QUOTA_COOLDOWN_MS;
   return {
@@ -52,18 +52,18 @@ export function reconcileUsageBlock(
   if (!block.estimated || block.retryAt === undefined) {
     return block;
   }
-  const observedReset = earliestExhaustedReset(usage, now);
+  const observedReset = latestExhaustedReset(usage, now);
   if (observedReset === undefined) {
     return undefined;
   }
   return {
     ...block,
-    retryAt: Math.min(block.retryAt, observedReset),
+    retryAt: Math.min(observedReset, now + MAX_COOLDOWN_MS),
     estimated: false,
   };
 }
 
-function earliestExhaustedReset(usage: UsageSnapshot | undefined, now: number): number | undefined {
+function latestExhaustedReset(usage: UsageSnapshot | undefined, now: number): number | undefined {
   if (!usage) {
     return undefined;
   }
@@ -78,5 +78,5 @@ function earliestExhaustedReset(usage: UsageSnapshot | undefined, now: number): 
     )
     .map((window) => window?.resetsAt)
     .filter((reset): reset is number => reset !== undefined);
-  return resets.length > 0 ? Math.min(...resets) : undefined;
+  return resets.length > 0 ? Math.max(...resets) : undefined;
 }

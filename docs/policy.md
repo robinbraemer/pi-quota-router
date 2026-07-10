@@ -61,12 +61,12 @@ Primer work renews both its singleton sweep lease and account lease. Foreground 
 - A transport `start` event is replay-safe.
 - Any text, thinking, or tool-call start makes replay unsafe; later errors are forwarded without account rotation.
 - A request performs at most five account attempts.
-- An explicit provider retry time controls a quota block. Otherwise the earliest observed reset of an exhausted window is used; without either, the estimate is one hour.
+- An explicit provider retry time controls a quota block. Otherwise the latest observed reset across exhausted windows is used; without either, the estimate is one hour.
 - All-limited recovery waits are abortable, recheck state at most once per minute, and stop after six hours.
 - `invalid_grant` and revoked refresh tokens set `needsReauth` until a new login replaces the credentials.
 - Generic network/timeout failures use a one-minute transient retry time.
 - A generic pre-output `401` forces one token refresh and retries the same account before rotation.
-- A forced usage refresh clears an estimated block when quota is available; if an exhausted window has an observed reset, it replaces the estimate without extending the existing deadline.
+- A forced usage refresh clears an estimated block when quota is available; otherwise the latest observed exhausted-window reset replaces the estimate.
 - Reauthenticating the same Codex identity clears its persisted authentication block.
 
 Concurrent usage refreshes for one account are coalesced. Cancelling one caller stops that caller's wait without cancelling the shared fetch needed by other callers.

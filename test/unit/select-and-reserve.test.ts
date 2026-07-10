@@ -59,12 +59,24 @@ describe("selectAndReserve", () => {
       schema: RuntimeStateFileSchema,
       createDefault: () => structuredClone(defaultRuntimeState),
     });
+    await store.update((state) => ({
+      ...state,
+      blocks: [
+        {
+          accountId: "a",
+          kind: "quota",
+          blockedAt: NOW,
+          retryAt: NOW + 1000,
+          estimated: false,
+        },
+      ],
+    }));
 
     const result = await selectAndReserve({
       stateStore: store,
       request: {
         candidates: [candidate("a", NOW, { untouched: true })],
-        config: defaultConfig,
+        config: { ...defaultConfig, enabled: false },
         now: NOW,
       },
       owner: { processId: 1, sessionId: "s", requestId: "r" },

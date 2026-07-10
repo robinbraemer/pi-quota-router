@@ -427,9 +427,9 @@ Classify quota/rate-limit failures from:
 - HTTP-equivalent error metadata when exposed.
 - `429`, `quota`, `usage limit`, `rate limit`, `too many requests`, and Codex usage-limit codes.
 
-After a quota failure, force-refresh usage. An explicit provider retry time controls the block; otherwise use the earliest reset among exhausted windows. If neither is available, use a one-hour cooldown. Every observed deadline is capped at six hours.
+After a quota failure, force-refresh usage. An explicit provider retry time controls the block; otherwise use the latest reset among exhausted windows. If neither is available, use a one-hour cooldown. Every observed deadline is capped at six hours.
 
-An explicit forced refresh reconciles an estimated cooldown: available quota clears it, while an observed exhausted-window reset can replace the estimate without extending the current deadline.
+An explicit forced refresh reconciles an estimated cooldown: available quota clears it, while the latest observed exhausted-window reset replaces the estimate.
 
 ### Authentication classification
 

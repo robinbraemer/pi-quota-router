@@ -13,6 +13,7 @@ export interface ReservedSelection {
 export async function selectAndReserve(input: {
   stateStore: AtomicJsonStore<RuntimeStateFile>;
   request: SelectionInput;
+  excludedAccountIds?: ReadonlySet<string>;
   owner: ReservationOwner;
   now: number;
 }): Promise<ReservedSelection> {
@@ -32,20 +33,30 @@ export async function selectAndReserve(input: {
         ...(reservation ? { reservation } : {}),
       };
     });
-    const decision = selectAccount({ ...input.request, candidates, now: input.now });
-    const recoverableAccountIds = decision.candidates
-      .filter((explanation) => {
-        const candidate = candidates.find((value) => value.accountId === explanation.accountId);
+    const eligibleForAttempt = input.excludedAccountIds
+      ? candidates.filter((candidate) => !input.excludedAccountIds?.has(candidate.accountId))
+      : candidates;
+    const decision = selectAccount({
+      ...input.request,
+      candidates: eligibleForAttempt,
+      now: input.now,
+    });
+    const recoverableAccountIds = candidates
+      .filter((candidate) => {
+        const explanation = decision.candidates.find(
+          (value) => value.accountId === candidate.accountId,
+        );
+        const excluded = input.excludedAccountIds?.has(candidate.accountId) ?? false;
         return (
-          (explanation.rejectionCode === "blocked" &&
-            candidate?.block?.retryAt !== undefined &&
+          ((excluded || explanation?.rejectionCode === "blocked") &&
+            candidate.block?.retryAt !== undefined &&
             candidate.block.retryAt > input.now) ||
-          (explanation.rejectionCode === "reserved" &&
-            candidate?.reservation !== undefined &&
+          ((excluded || explanation?.rejectionCode === "reserved") &&
+            candidate.reservation !== undefined &&
             candidate.reservation.expiresAt > input.now)
         );
       })
-      .map((explanation) => explanation.accountId);
+      .map((candidate) => candidate.accountId);
     if (!decision.accountId) {
       result = { decision, recoverableAccountIds };
       return { ...state, reservations: liveReservations, lastSelection: decision };

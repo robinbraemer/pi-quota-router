@@ -21,14 +21,14 @@ function exhausted(shortReset?: number, weeklyReset?: number): UsageSnapshot {
 }
 
 describe("recovery state", () => {
-  test("blocks quota until the earliest exhausted active window", () => {
+  test("blocks quota until every exhausted active window resets", () => {
     const block = blockFromFailure(
       "a",
       { kind: "quota" },
       exhausted(NOW + 3_600_000, NOW + 7_200_000),
       NOW,
     );
-    expect(block).toEqual(expect.objectContaining({ retryAt: NOW + 3_600_000, estimated: false }));
+    expect(block).toEqual(expect.objectContaining({ retryAt: NOW + 7_200_000, estimated: false }));
   });
 
   test("uses a one-hour estimate when no reset is reliable", () => {
@@ -36,15 +36,15 @@ describe("recovery state", () => {
     expect(block).toEqual(expect.objectContaining({ retryAt: NOW + 3_600_000, estimated: true }));
   });
 
-  test("fresh usage can shorten but never extend an estimated cooldown", () => {
+  test("fresh authoritative usage replaces an estimated cooldown", () => {
     const block = blockFromFailure("a", { kind: "quota" }, undefined, NOW);
     const shorter = reconcileUsageBlock(block, exhausted(NOW + 1_800_000, NOW + 7_200_000), NOW);
-    expect(shorter?.retryAt).toBe(NOW + 1_800_000);
+    expect(shorter?.retryAt).toBe(NOW + 7_200_000);
     const longer = reconcileUsageBlock(
       { ...block, retryAt: NOW + 900_000 },
       exhausted(NOW + 7_200_000, NOW + 10_800_000),
       NOW,
     );
-    expect(longer?.retryAt).toBe(NOW + 900_000);
+    expect(longer?.retryAt).toBe(NOW + 10_800_000);
   });
 });

@@ -100,10 +100,9 @@ export function createAccountVault(options: AccountVaultOptions): AccountVault {
 
   const refreshAccount = async (
     id: string,
-    signal?: AbortSignal,
     rejectedAccessToken?: string,
   ): Promise<FreshCredential> =>
-    withAccountRefreshLock(options, id, signal, async () => {
+    withAccountRefreshLock(options, id, async () => {
       const account = await findAccount(id);
       if (account.needsReauth) {
         throw new AccountNeedsReauthError();
@@ -167,12 +166,8 @@ export function createAccountVault(options: AccountVaultOptions): AccountVault {
       return toFreshCredential(saved);
     });
 
-  const startRefresh = (
-    id: string,
-    signal?: AbortSignal,
-    rejectedAccessToken?: string,
-  ): Promise<FreshCredential> => {
-    const refresh = refreshAccount(id, signal, rejectedAccessToken).finally(() => {
+  const startRefresh = (id: string, rejectedAccessToken?: string): Promise<FreshCredential> => {
+    const refresh = refreshAccount(id, rejectedAccessToken).finally(() => {
       if (refreshes.get(id) === refresh) {
         refreshes.delete(id);
       }
@@ -232,20 +227,20 @@ export function createAccountVault(options: AccountVaultOptions): AccountVault {
 
       const pending = refreshes.get(id);
       if (pending) {
-        return pending;
+        return awaitWithSignal(pending, signal);
       }
-      return startRefresh(id, signal);
+      return awaitWithSignal(startRefresh(id), signal);
     },
 
     async forceRefreshCredential(id, rejectedAccessToken, signal) {
       const pending = refreshes.get(id);
       if (pending) {
-        const credential = await pending;
+        const credential = await awaitWithSignal(pending, signal);
         if (credential.accessToken !== rejectedAccessToken) {
           return credential;
         }
       }
-      return startRefresh(id, signal, rejectedAccessToken);
+      return awaitWithSignal(startRefresh(id, rejectedAccessToken), signal);
     },
 
     async remove(id) {
@@ -282,6 +277,27 @@ function needsRefresh(expiresAt: number, now: number): boolean {
   return expiresAt <= now + REFRESH_EARLY_MS;
 }
 
+function awaitWithSignal<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) {
+    return promise;
+  }
+  signal.throwIfAborted();
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    );
+  });
+}
+
 async function markNeedsReauth(
   store: AtomicJsonStore<AccountVaultFile>,
   id: string,
@@ -297,7 +313,6 @@ async function markNeedsReauth(
 async function withAccountRefreshLock<T>(
   options: AccountVaultOptions,
   id: string,
-  signal: AbortSignal | undefined,
   operation: () => Promise<T>,
 ): Promise<T> {
   await mkdir(options.refreshLockDirectory, { recursive: true, mode: 0o700 });
@@ -309,7 +324,6 @@ async function withAccountRefreshLock<T>(
 
   const deadline = Date.now() + REFRESH_LOCK_TIMEOUT_MS;
   while (Date.now() <= deadline) {
-    signal?.throwIfAborted();
     try {
       const release = await lockfile.lock(target, {
         realpath: false,
@@ -329,7 +343,7 @@ async function withAccountRefreshLock<T>(
       if (remaining <= 0) {
         break;
       }
-      await delay(Math.min(10, remaining), undefined, { signal });
+      await delay(Math.min(10, remaining));
     }
   }
   throw new TokenRefreshTransientError();

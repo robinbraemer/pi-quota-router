@@ -163,31 +163,33 @@ export async function createRouterController(
       ]);
       cachedConfig = config;
       const candidates = await Promise.all(
-        summaries
-          .filter((account) => !request.excludedAccountIds.has(account.id))
-          .map(async (account): Promise<Candidate> => {
-            const snapshot = await usage
-              .get(account.id, {
-                ...(request.options?.signal ? { signal: request.options.signal } : {}),
-              })
-              .catch(() => undefined);
-            const block = state.blocks.find((value) => value.accountId === account.id);
-            return {
-              accountId: account.id,
-              label: account.label,
-              needsReauth: account.needsReauth,
-              ...(snapshot ? { usage: snapshot } : {}),
-              ...(block ? { block } : {}),
-              untouched:
-                snapshot?.shortWindow.usedPercent === 0 &&
-                snapshot.weeklyWindow?.usedPercent === 0 &&
-                snapshot.weeklyWindow.resetsAt === undefined &&
-                !state.priming.confirmedAccountIds.includes(account.id),
-            };
-          }),
+        summaries.map(async (account): Promise<Candidate> => {
+          const snapshot = await usage
+            .get(account.id, {
+              ...(request.options?.signal ? { signal: request.options.signal } : {}),
+            })
+            .catch(() => {
+              request.options?.signal?.throwIfAborted();
+              return undefined;
+            });
+          const block = state.blocks.find((value) => value.accountId === account.id);
+          return {
+            accountId: account.id,
+            label: account.label,
+            needsReauth: account.needsReauth,
+            ...(snapshot ? { usage: snapshot } : {}),
+            ...(block ? { block } : {}),
+            untouched:
+              snapshot?.shortWindow.usedPercent === 0 &&
+              snapshot.weeklyWindow?.usedPercent === 0 &&
+              snapshot.weeklyWindow.resetsAt === undefined &&
+              !state.priming.confirmedAccountIds.includes(account.id),
+          };
+        }),
       );
       const selected = await selectAndReserve({
         stateStore,
+        excludedAccountIds: request.excludedAccountIds,
         request: {
           candidates,
           config,

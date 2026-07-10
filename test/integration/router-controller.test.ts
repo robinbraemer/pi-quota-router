@@ -217,6 +217,14 @@ describe("RouterController", () => {
         ]),
     });
     await controller.vault.addFromOAuth("work", makeCredentials("account-1", 3_000_000_000_000));
+    const configStore = createAtomicJsonStore<RouterConfig>({
+      path: paths.config,
+      schema: RouterConfigSchema,
+      createDefault: () => {
+        throw new Error("config should already exist");
+      },
+    });
+    await configStore.update((config) => ({ ...config, maxRotationAttempts: 1 }));
 
     await collectController(controller);
     const stateStore = createAtomicJsonStore<RuntimeStateFile>({
@@ -358,6 +366,88 @@ describe("RouterController", () => {
       expect(events[0].error.errorMessage).toContain("configured wait limit");
     }
     await controller.shutdown();
+  });
+
+  test("waits for recovery after the final candidate fails before output", async () => {
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    const paths = resolveRouterPaths(fixture.directory);
+    const controller = await createRouterController({
+      paths,
+      clock: () => 2_000_000_000_000,
+      oauth: { refresh: async () => makeCredentials("account-1", 3_000_000_000_000) },
+      fetchImpl: async () => Response.json(completeUsageResponse),
+      baseStream: () =>
+        eventStream([
+          { type: "error", reason: "error", error: message("error", "usage limit reached") },
+        ]),
+    });
+    await controller.vault.addFromOAuth("work", makeCredentials("account-1", 3_000_000_000_000));
+    const configStore = createAtomicJsonStore<RouterConfig>({
+      path: paths.config,
+      schema: RouterConfigSchema,
+      createDefault: () => {
+        throw new Error("config should already exist");
+      },
+    });
+    await configStore.update((config) => ({
+      ...config,
+      maxRotationAttempts: 2,
+      maxRecoveryWaitMs: 0,
+    }));
+
+    const events = await collectController(controller);
+
+    expect(events[0]?.type).toBe("error");
+    if (events[0]?.type === "error") {
+      expect(events[0].error.errorMessage).toContain("configured wait limit");
+    }
+    await controller.shutdown();
+  });
+
+  test("reports cancellation during initial usage collection as aborted", async () => {
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    const controller = new AbortController();
+    let markUsageStarted: (() => void) | undefined;
+    const usageStarted = new Promise<void>((resolve) => {
+      markUsageStarted = resolve;
+    });
+    const router = await createRouterController({
+      paths: resolveRouterPaths(fixture.directory),
+      clock: () => 2_000_000_000_000,
+      oauth: { refresh: async () => makeCredentials("account-1", 3_000_000_000_000) },
+      fetchImpl: async (_input, init) => {
+        markUsageStarted?.();
+        return await new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), {
+            once: true,
+          });
+        });
+      },
+      baseStream: () => eventStream(successfulText()),
+    });
+    await router.vault.addFromOAuth("work", makeCredentials("account-1", 3_000_000_000_000));
+    const model = Object.values(OPENAI_CODEX_MODELS)[0] as Model<"openai-codex-responses">;
+    const collecting = (async () => {
+      const events: AssistantMessageEvent[] = [];
+      for await (const event of router.routedStream(model, { messages: [] } as Context, {
+        signal: controller.signal,
+      })) {
+        events.push(event);
+      }
+      return events;
+    })();
+    await usageStarted;
+    controller.abort(new DOMException("cancelled", "AbortError"));
+
+    const events = await collecting;
+
+    expect(events[0]?.type).toBe("error");
+    if (events[0]?.type === "error") {
+      expect(events[0].reason).toBe("aborted");
+    }
+    await router.shutdown();
   });
 
   test("reports unsafe persisted file modes as invalid", async () => {
