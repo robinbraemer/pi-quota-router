@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { AccountNeedsReauthError } from "../../src/accounts/account-vault.ts";
 import type { UsageSnapshot } from "../../src/types.ts";
 import { createUsageService } from "../../src/usage/usage-service.ts";
 
@@ -140,5 +141,24 @@ describe("UsageService", () => {
     expect(await service.get("a")).toEqual(expect.objectContaining({ stale: true }));
     now += 86_400_001;
     await expect(service.get("a", { force: true })).rejects.toThrow("offline");
+  });
+
+  test("never masks a definitive authentication failure with stale usage", async () => {
+    let failAuth = false;
+    const service = createUsageService({
+      clock: () => 1_000_000,
+      jitterMs: () => 0,
+      fetchUsage: async (accountId) => {
+        if (failAuth) {
+          throw new AccountNeedsReauthError();
+        }
+        return snapshot(accountId, 1_000_000);
+      },
+    });
+
+    await service.get("a");
+    failAuth = true;
+
+    await expect(service.get("a", { force: true })).rejects.toBeInstanceOf(AccountNeedsReauthError);
   });
 });
