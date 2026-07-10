@@ -45,7 +45,6 @@ export interface RouterController extends ProviderController {
   operations: QuotaRouterOperations;
   assertReady(): Promise<void>;
   setForegroundActive(active: boolean): void;
-  schedulePriming(): void;
   shutdown(): Promise<void>;
 }
 
@@ -568,9 +567,6 @@ export async function createRouterController(
     },
     setForegroundActive(active) {
       priming.setForegroundActive(active);
-    },
-    schedulePriming() {
-      priming.scheduleSweep("idle");
     },
     async shutdown() {
       await priming.shutdown();

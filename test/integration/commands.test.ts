@@ -100,7 +100,6 @@ describe("/quota-router commands", () => {
         calls.push(args);
         return "primed";
       },
-      confirmPriming: async () => "confirmed",
     } as unknown as QuotaRouterOperations;
     const ctx = {
       model: { id: "gpt-5.2-codex" },

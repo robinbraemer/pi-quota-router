@@ -7,7 +7,6 @@ describe("extension lifecycle", () => {
   test("tracks foreground state without scheduling background priming, and shuts down", async () => {
     const handlers = new Map<string, (...args: never[]) => unknown>();
     const foreground: boolean[] = [];
-    let priming = 0;
     let shutdown = 0;
     const pi = {
       registerProvider: () => undefined,
@@ -22,9 +21,6 @@ describe("extension lifecycle", () => {
       vault: {},
       assertReady: async () => undefined,
       setForegroundActive: (active: boolean) => foreground.push(active),
-      schedulePriming: () => {
-        priming += 1;
-      },
       shutdown: async () => {
         shutdown += 1;
       },
@@ -41,7 +37,6 @@ describe("extension lifecycle", () => {
     await handlers.get("agent_settled")?.({} as never, ctx as never);
     await handlers.get("session_shutdown")?.({} as never, ctx as never);
     expect(foreground).toEqual([true, false]);
-    expect(priming).toBe(0);
     expect(shutdown).toBe(1);
   });
 });

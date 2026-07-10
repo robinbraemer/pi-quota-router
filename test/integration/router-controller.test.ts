@@ -671,6 +671,57 @@ describe("RouterController", () => {
     await controller.shutdown();
   });
 
+  test("primes at most one account without enabling automatic priming", async () => {
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    const paths = resolveRouterPaths(fixture.directory);
+    const usageCalls = new Map<string, number>();
+    let primerCalls = 0;
+    const controller = await createRouterController({
+      paths,
+      clock: () => 2_000_000_000_000,
+      oauth: { refresh: async () => makeCredentials("account-1", 3_000_000_000_000) },
+      fetchImpl: async (_input, init) => {
+        const accountId = new Headers(init?.headers).get("ChatGPT-Account-Id") ?? "unknown";
+        const calls = (usageCalls.get(accountId) ?? 0) + 1;
+        usageCalls.set(accountId, calls);
+        return Response.json({
+          rate_limit: {
+            primary_window: { used_percent: 0, reset_at: 2_000_018_000 },
+            secondary_window: {
+              used_percent: 0,
+              ...(calls > 1 ? { reset_at: 2_000_604_800 } : {}),
+            },
+          },
+        });
+      },
+      baseStream: () => {
+        primerCalls += 1;
+        return eventStream(successfulText());
+      },
+    });
+    await controller.vault.addFromOAuth("first", makeCredentials("account-1", 3_000_000_000_000));
+    await controller.vault.addFromOAuth("second", makeCredentials("account-2", 3_000_000_000_000));
+    const configStore = createAtomicJsonStore<RouterConfig>({
+      path: paths.config,
+      schema: RouterConfigSchema,
+      createDefault: () => {
+        throw new Error("config should already exist");
+      },
+    });
+
+    const model = Object.values(OPENAI_CODEX_MODELS)[0] as Model<"openai-codex-responses">;
+    const result = await controller.operations.prime("all", model.id);
+    const config = await configStore.read();
+
+    expect(result).toContain("first: confirmed");
+    expect(primerCalls).toBe(1);
+    expect(usageCalls.has("account-2")).toBe(false);
+    expect(config.priming.enabled).toBe(false);
+    expect(config.priming.confirmedFirstUseRollingWindow).toBe(false);
+    await controller.shutdown();
+  });
+
   test("uses the configured maximum recovery wait", async () => {
     const fixture = await createStorageFixture();
     cleanups.push(fixture.cleanup);

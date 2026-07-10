@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { AccountNeedsReauthError } from "../../src/accounts/account-vault.ts";
 import type { UsageSnapshot } from "../../src/types.ts";
-import { createUsageService } from "../../src/usage/usage-service.ts";
+import { createConcurrencyGate, createUsageService } from "../../src/usage/usage-service.ts";
 
 function snapshot(accountId: string, observedAt: number): UsageSnapshot {
   return {
@@ -97,6 +97,28 @@ describe("UsageService", () => {
     expect(calls).toBe(2);
   });
 
+  test("refreshes a cached snapshot after its weekly reset elapses", async () => {
+    let now = 1_000_000;
+    let calls = 0;
+    const service = createUsageService({
+      clock: () => now,
+      jitterMs: () => 0,
+      fetchUsage: async (accountId) => {
+        calls += 1;
+        return {
+          ...snapshot(accountId, now),
+          weeklyWindow: { usedPercent: 20, resetsAt: now + 1_000 },
+        };
+      },
+    });
+
+    await service.get("a");
+    now += 1_001;
+    await service.get("a");
+
+    expect(calls).toBe(2);
+  });
+
   test("runs a forced fetch after a request that was already in flight", async () => {
     let releaseFirst: (() => void) | undefined;
     let calls = 0;
@@ -153,6 +175,37 @@ describe("UsageService", () => {
     expect(calls).toBe(2);
   });
 
+  test("does not start a duplicate forced fetch during follow-up handoff", async () => {
+    let releaseFirst: (() => void) | undefined;
+    let calls = 0;
+    let requestDuringHandoff: Promise<UsageSnapshot> | undefined;
+    const service = createUsageService({
+      clock: () => 1_000_000,
+      jitterMs: () => 0,
+      fetchUsage: async (accountId) => {
+        calls += 1;
+        if (calls === 1) {
+          await new Promise<void>((resolve) => {
+            releaseFirst = resolve;
+          });
+        }
+        return snapshot(accountId, 1_000_000 + calls);
+      },
+    });
+
+    const first = service.get("a");
+    await Bun.sleep(0);
+    const forced = service.get("a", { force: true });
+    first.finally(() => {
+      requestDuringHandoff = service.get("a", { force: true });
+    });
+    releaseFirst?.();
+
+    expect((await forced).observedAt).toBe(1_000_002);
+    expect((await requestDuringHandoff)?.observedAt).toBe(1_000_002);
+    expect(calls).toBe(2);
+  });
+
   test("allows at most two upstream usage requests concurrently", async () => {
     let active = 0;
     let maximum = 0;
@@ -170,6 +223,30 @@ describe("UsageService", () => {
 
     await Promise.all(["a", "b", "c", "d"].map((accountId) => service.get(accountId)));
     expect(maximum).toBe(2);
+  });
+
+  test("hands a released concurrency slot to the oldest waiter", async () => {
+    const gate = createConcurrencyGate(1);
+    const releaseFirst = await gate.acquire();
+    let waitingAcquired = false;
+    let newcomerAcquired = false;
+    const waiting = gate.acquire().then((release) => {
+      waitingAcquired = true;
+      return release;
+    });
+
+    releaseFirst();
+    const newcomer = gate.acquire().then((release) => {
+      newcomerAcquired = true;
+      return release;
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(waitingAcquired).toBe(true);
+    expect(newcomerAcquired).toBe(false);
+    (await waiting)();
+    (await newcomer)();
   });
 
   test("uses the current configured freshness threshold", async () => {

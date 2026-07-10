@@ -28,6 +28,11 @@ export interface UsageService {
   invalidate(accountId: string): void;
 }
 
+interface ForcedFollowup {
+  promise: Promise<UsageSnapshot>;
+  started: boolean;
+}
+
 export function createUsageService(options: UsageServiceOptions): UsageService {
   const clock = options.clock ?? systemClock;
   const freshnessMs = () =>
@@ -38,7 +43,7 @@ export function createUsageService(options: UsageServiceOptions): UsageService {
   const jitterMs = options.jitterMs ?? (() => 0);
   const cache = new Map<string, UsageSnapshot>();
   const inflight = new Map<string, Promise<UsageSnapshot>>();
-  const forcedFollowups = new Map<string, Promise<UsageSnapshot>>();
+  const forcedFollowups = new Map<string, ForcedFollowup>();
   const gate = createConcurrencyGate(options.maxConcurrent ?? DEFAULT_MAX_CONCURRENT);
 
   const startRequest = (accountId: string, signal?: AbortSignal): Promise<UsageSnapshot> => {
@@ -81,12 +86,19 @@ export function createUsageService(options: UsageServiceOptions): UsageService {
 
     async get(accountId, getOptions = {}) {
       const cached = cache.get(accountId);
+      const now = clock();
       if (
         !getOptions.force &&
         cached &&
-        clock() - cached.observedAt < freshnessMs() + jitterMs(accountId)
+        now - cached.observedAt < freshnessMs() + jitterMs(accountId) &&
+        (cached.weeklyWindow?.resetsAt === undefined || cached.weeklyWindow.resetsAt > now)
       ) {
         return cached;
+      }
+
+      const queued = forcedFollowups.get(accountId);
+      if (queued && !queued.started) {
+        return raceWithSignal(queued.promise, getOptions.signal);
       }
 
       const pending = inflight.get(accountId);
@@ -94,19 +106,22 @@ export function createUsageService(options: UsageServiceOptions): UsageService {
         if (!getOptions.force) {
           return raceWithSignal(pending, getOptions.signal);
         }
-        let followup = forcedFollowups.get(accountId);
-        if (!followup) {
-          followup = pending
-            .catch(() => undefined)
-            .then(() => startRequest(accountId))
-            .finally(() => {
-              if (forcedFollowups.get(accountId) === followup) {
-                forcedFollowups.delete(accountId);
-              }
-            });
-          forcedFollowups.set(accountId, followup);
-        }
-        return raceWithSignal(followup, getOptions.signal);
+        const predecessor = queued?.promise ?? pending;
+        let followup: ForcedFollowup;
+        const promise = predecessor
+          .catch(() => undefined)
+          .then(() => {
+            followup.started = true;
+            return startRequest(accountId);
+          })
+          .finally(() => {
+            if (forcedFollowups.get(accountId) === followup) {
+              forcedFollowups.delete(accountId);
+            }
+          });
+        followup = { promise, started: false };
+        forcedFollowups.set(accountId, followup);
+        return raceWithSignal(followup.promise, getOptions.signal);
       }
 
       return startRequest(accountId, getOptions.signal);
@@ -122,19 +137,13 @@ export function createUsageService(options: UsageServiceOptions): UsageService {
   };
 }
 
-function createConcurrencyGate(maximum: number) {
+export function createConcurrencyGate(maximum: number) {
   let active = 0;
   const waiters: Array<() => void> = [];
 
-  const wakeNext = () => {
-    const next = waiters.shift();
-    if (next) {
-      next();
-    }
-  };
-
   return {
     async acquire(signal?: AbortSignal): Promise<() => void> {
+      let inheritedSlot = false;
       if (active >= maximum) {
         await new Promise<void>((resolve, reject) => {
           const onAbort = () => {
@@ -146,22 +155,29 @@ function createConcurrencyGate(maximum: number) {
           };
           const onReady = () => {
             signal?.removeEventListener("abort", onAbort);
+            inheritedSlot = true;
             resolve();
           };
           waiters.push(onReady);
           signal?.addEventListener("abort", onAbort, { once: true });
         });
       }
-      signal?.throwIfAborted();
-      active += 1;
+      if (!inheritedSlot) {
+        signal?.throwIfAborted();
+        active += 1;
+      }
       let released = false;
       return () => {
         if (released) {
           return;
         }
         released = true;
-        active -= 1;
-        wakeNext();
+        const next = waiters.shift();
+        if (next) {
+          next();
+        } else {
+          active -= 1;
+        }
       };
     },
   };
