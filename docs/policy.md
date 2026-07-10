@@ -51,9 +51,9 @@ The manual account is still unavailable when it needs reauthentication, has an a
 
 ## Reservations and concurrency
 
-Selection and reservation happen inside one locked state update. A foreground lease lasts two minutes unless released earlier at stream completion/error. Expired leases are removed during later selection. Two concurrent Pi controllers sharing a profile therefore cannot acquire the same free account.
+Selection and reservation happen inside one locked state update. Foreground and primer leases use a two-minute abandonment window and renew every 40 seconds while their work remains active. Completion, error, or cancellation releases them immediately; crashed owners stop renewing and expire naturally. Two concurrent Pi controllers sharing a profile therefore cannot acquire the same free account.
 
-Primer work uses both a singleton sweep lease and an account lease. Foreground activity stops primer work so synthetic spend does not compete with a user request.
+Primer work renews both its singleton sweep lease and account lease. Foreground activity stops primer work so synthetic spend does not compete with a user request.
 
 ## Failure and recovery policy
 

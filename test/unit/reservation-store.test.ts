@@ -78,6 +78,28 @@ describe("ReservationStore", () => {
     expect((await store.read()).reservations.map((value) => value.accountId)).toEqual(["live"]);
   });
 
+  test("renews only a live matching lease token", async () => {
+    const { store, reservations } = await setup();
+    await store.update((state) => ({
+      ...state,
+      reservations: [
+        {
+          accountId: "a",
+          leaseToken: "live",
+          owner: { processId: 1, sessionId: "s", requestId: "r" },
+          createdAt: NOW,
+          expiresAt: NOW + 1000,
+          kind: "foreground",
+        },
+      ],
+    }));
+
+    expect(await reservations.renew("wrong", NOW + 500, 2000)).toBe(false);
+    expect(await reservations.renew("live", NOW + 500, 2000)).toBe(true);
+    expect((await store.read()).reservations[0]?.expiresAt).toBe(NOW + 2500);
+    expect(await reservations.renew("live", NOW + 3000, 2000)).toBe(false);
+  });
+
   test("allows only one live singleton primer sweep", async () => {
     const { reservations } = await setup();
     const owner = { processId: 1, sessionId: "s", requestId: "prime-1" };

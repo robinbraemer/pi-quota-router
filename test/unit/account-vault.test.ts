@@ -111,6 +111,26 @@ describe("AccountVault", () => {
     expect(credentials[0].accessToken).toBe(credentials[1].accessToken);
   });
 
+  test("force refreshes a rejected but nominally unexpired access token", async () => {
+    let refreshes = 0;
+    const { createVault } = await setup({
+      refresh: async () => {
+        refreshes += 1;
+        return makeCredentials("account-1", NOW + 3_600_000, "forced");
+      },
+    });
+    const vault = createVault();
+    const original = makeCredentials("account-1", NOW + 3_600_000, "rejected");
+    const id = await vault.addFromOAuth("work", original);
+
+    const credential = await vault.forceRefreshCredential(id, original.access);
+
+    expect(refreshes).toBe(1);
+    expect(credential.accessToken).toBe(
+      makeCredentials("account-1", NOW + 3_600_000, "forced").access,
+    );
+  });
+
   test("marks definitive invalid_grant failures for reauthentication", async () => {
     const { createVault } = await setup({
       refresh: async () => {

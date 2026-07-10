@@ -55,6 +55,28 @@ describe("UsageService", () => {
     expect(maximum).toBe(2);
   });
 
+  test("uses the current configured freshness threshold", async () => {
+    let now = 1_000_000;
+    let freshnessMs = 300_000;
+    let calls = 0;
+    const service = createUsageService({
+      clock: () => now,
+      freshnessMs: () => freshnessMs,
+      jitterMs: () => 0,
+      fetchUsage: async (accountId) => {
+        calls += 1;
+        return snapshot(accountId, now);
+      },
+    });
+
+    await service.get("a");
+    freshnessMs = 1;
+    now += 2;
+    await service.get("a");
+
+    expect(calls).toBe(2);
+  });
+
   test("returns a marked last-good value for up to 24 hours", async () => {
     let now = 1_000_000;
     let fail = false;

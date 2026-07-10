@@ -9,7 +9,7 @@ export interface UsageServiceOptions {
   clock?: Clock;
   jitterMs?: (accountId: string) => number;
   fetchUsage: (accountId: string, signal?: AbortSignal) => Promise<UsageSnapshot>;
-  freshnessMs?: number;
+  freshnessMs?: number | (() => number);
   maxStaleMs?: number;
   maxConcurrent?: number;
 }
@@ -27,7 +27,10 @@ export interface UsageService {
 
 export function createUsageService(options: UsageServiceOptions): UsageService {
   const clock = options.clock ?? systemClock;
-  const freshnessMs = options.freshnessMs ?? DEFAULT_FRESHNESS_MS;
+  const freshnessMs = () =>
+    typeof options.freshnessMs === "function"
+      ? options.freshnessMs()
+      : (options.freshnessMs ?? DEFAULT_FRESHNESS_MS);
   const maxStaleMs = options.maxStaleMs ?? DEFAULT_MAX_STALE_MS;
   const jitterMs = options.jitterMs ?? (() => 0);
   const cache = new Map<string, UsageSnapshot>();
@@ -40,7 +43,7 @@ export function createUsageService(options: UsageServiceOptions): UsageService {
       if (
         !getOptions.force &&
         cached &&
-        clock() - cached.observedAt < freshnessMs + jitterMs(accountId)
+        clock() - cached.observedAt < freshnessMs() + jitterMs(accountId)
       ) {
         return cached;
       }

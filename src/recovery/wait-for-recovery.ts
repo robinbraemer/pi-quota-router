@@ -23,6 +23,7 @@ export class NoRecoverableAccountError extends Error {
 
 export interface WaitForRecoveryOptions {
   stateStore: AtomicJsonStore<RuntimeStateFile>;
+  accountIds?: readonly string[];
   clock: () => number;
   sleep?: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
   signal?: AbortSignal;
@@ -46,12 +47,22 @@ export async function waitForRecovery(options: WaitForRecoveryOptions): Promise<
       throw new RecoveryWaitTimeoutError();
     }
     const state = await options.stateStore.read();
-    if (state.blocks.length === 0) {
+    const accountIds = options.accountIds ? new Set(options.accountIds) : undefined;
+    const blocks = accountIds
+      ? state.blocks.filter((block) => accountIds.has(block.accountId))
+      : state.blocks;
+    const reservations = accountIds
+      ? state.reservations.filter(
+          (reservation) => accountIds.has(reservation.accountId) && reservation.expiresAt > now,
+        )
+      : [];
+    if (blocks.length === 0 && reservations.length === 0) {
       return;
     }
-    const retryTimes = state.blocks
-      .map((block) => block.retryAt)
-      .filter((retryAt): retryAt is number => retryAt !== undefined);
+    const retryTimes = [
+      ...blocks.map((block) => block.retryAt),
+      ...reservations.map((reservation) => reservation.expiresAt),
+    ].filter((retryAt): retryAt is number => retryAt !== undefined);
     if (retryTimes.length === 0) {
       throw new NoRecoverableAccountError();
     }

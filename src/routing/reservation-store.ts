@@ -7,6 +7,7 @@ const PRIMER_SWEEP_ACCOUNT = "__primer_sweep__";
 
 export interface ReservationStore {
   release(leaseToken: string): Promise<boolean>;
+  renew(leaseToken: string, now: number, ttlMs: number): Promise<boolean>;
   cleanupExpired(now: number): Promise<number>;
   acquirePrimerSweep(
     owner: ReservationOwner,
@@ -30,6 +31,23 @@ export function createReservationStore(store: AtomicJsonStore<RuntimeStateFile>)
         return { ...state, reservations };
       });
       return released;
+    },
+
+    async renew(leaseToken, now, ttlMs) {
+      let renewed = false;
+      await store.update((state) => ({
+        ...state,
+        reservations: state.reservations
+          .filter((reservation) => reservation.expiresAt > now)
+          .map((reservation) => {
+            if (reservation.leaseToken !== leaseToken) {
+              return reservation;
+            }
+            renewed = true;
+            return { ...reservation, expiresAt: now + ttlMs };
+          }),
+      }));
+      return renewed;
     },
 
     async cleanupExpired(now) {

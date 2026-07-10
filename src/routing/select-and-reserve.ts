@@ -6,6 +6,7 @@ import { type SelectionInput, selectAccount } from "./selection-policy.ts";
 
 export interface ReservedSelection {
   decision: SelectionDecision;
+  recoverableAccountIds: string[];
   reservation?: Reservation;
 }
 
@@ -22,12 +23,31 @@ export async function selectAndReserve(input: {
       (reservation) => reservation.expiresAt > input.now,
     );
     const candidates = input.request.candidates.map((candidate) => {
+      const block = state.blocks.find((value) => value.accountId === candidate.accountId);
       const reservation = liveReservations.find((value) => value.accountId === candidate.accountId);
-      return reservation ? { ...candidate, reservation } : candidate;
+      const { block: _staleBlock, reservation: _staleReservation, ...current } = candidate;
+      return {
+        ...current,
+        ...(block ? { block } : {}),
+        ...(reservation ? { reservation } : {}),
+      };
     });
     const decision = selectAccount({ ...input.request, candidates, now: input.now });
+    const recoverableAccountIds = decision.candidates
+      .filter((explanation) => {
+        const candidate = candidates.find((value) => value.accountId === explanation.accountId);
+        return (
+          (explanation.rejectionCode === "blocked" &&
+            candidate?.block?.retryAt !== undefined &&
+            candidate.block.retryAt > input.now) ||
+          (explanation.rejectionCode === "reserved" &&
+            candidate?.reservation !== undefined &&
+            candidate.reservation.expiresAt > input.now)
+        );
+      })
+      .map((explanation) => explanation.accountId);
     if (!decision.accountId) {
-      result = { decision };
+      result = { decision, recoverableAccountIds };
       return { ...state, reservations: liveReservations, lastSelection: decision };
     }
 
@@ -39,7 +59,7 @@ export async function selectAndReserve(input: {
       expiresAt: input.now + input.request.config.reservationTtlMs,
       kind: "foreground",
     };
-    result = { decision, reservation };
+    result = { decision, recoverableAccountIds, reservation };
     return {
       ...state,
       reservations: [...liveReservations, reservation],

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { isPrimingAuthorized } from "../config.ts";
+import { startReservationHeartbeat } from "../routing/reservation-heartbeat.ts";
 import type { ReservationStore } from "../routing/reservation-store.ts";
 import type { AtomicJsonStore } from "../storage/atomic-json-store.ts";
 import type { RuntimeStateFile } from "../storage/schemas.ts";
@@ -37,6 +38,7 @@ export interface PrimingControllerOptions {
   owner: ReservationOwner;
   currentModelId: () => string;
   lowestReasoning: () => string;
+  onBackgroundError?: (error: unknown) => void;
 }
 
 export interface PrimingController {
@@ -44,6 +46,10 @@ export interface PrimingController {
   setForegroundActive(active: boolean): void;
   scheduleSweep(reason: "startup" | "manual" | "idle"): void;
   shutdown(): Promise<void>;
+}
+
+class PrimingInterruptedError extends Error {
+  override readonly name = "PrimingInterruptedError";
 }
 
 export function createPrimingController(options: PrimingControllerOptions): PrimingController {
@@ -79,16 +85,31 @@ export function createPrimingController(options: PrimingControllerOptions): Prim
     }
 
     let accountLease: Reservation | undefined;
+    let accountHeartbeat: ReturnType<typeof startReservationHeartbeat> | undefined;
     const controller = new AbortController();
     activeAbort = controller;
+    const sweepHeartbeat = startReservationHeartbeat({
+      leaseToken: sweep.leaseToken,
+      ttlMs: config.reservationTtlMs,
+      renew: (leaseToken, ttlMs) => options.reservations.renew(leaseToken, options.clock(), ttlMs),
+      signal: controller.signal,
+    });
     try {
       accountLease = await reservePrimerAccount(options, accountId, now, config.reservationTtlMs);
       if (!accountLease) {
         return { status: "reserved" };
       }
+      accountHeartbeat = startReservationHeartbeat({
+        leaseToken: accountLease.leaseToken,
+        ttlMs: config.reservationTtlMs,
+        renew: (leaseToken, ttlMs) =>
+          options.reservations.renew(leaseToken, options.clock(), ttlMs),
+        signal: sweepHeartbeat.signal,
+      });
+      const signal = accountHeartbeat.signal;
       const before = await options.usage.get(accountId, {
         force: true,
-        signal: controller.signal,
+        signal,
       });
       if (!isUntouchedCandidate(before)) {
         return { status: "not_candidate" };
@@ -104,11 +125,11 @@ export function createPrimingController(options: PrimingControllerOptions): Prim
           reasoning: options.lowestReasoning(),
           maxTokens: 1,
         },
-        controller.signal,
+        signal,
       );
       const after = await options.usage.get(accountId, {
         force: true,
-        signal: controller.signal,
+        signal,
       });
       const resetAt = after.weeklyWindow?.resetsAt;
       if (resetAt !== undefined) {
@@ -138,6 +159,8 @@ export function createPrimingController(options: PrimingControllerOptions): Prim
       return { status: "failed" };
     } finally {
       activeAbort = undefined;
+      await accountHeartbeat?.stop();
+      await sweepHeartbeat.stop();
       if (accountLease) {
         await options.reservations.release(accountLease.leaseToken);
       }
@@ -151,7 +174,7 @@ export function createPrimingController(options: PrimingControllerOptions): Prim
     setForegroundActive(active) {
       foregroundActive = active;
       if (active) {
-        activeAbort?.abort(new Error("Foreground request started"));
+        activeAbort?.abort(new PrimingInterruptedError("Foreground request started"));
       }
     },
 
@@ -161,19 +184,39 @@ export function createPrimingController(options: PrimingControllerOptions): Prim
       }
       background = (async () => {
         const ids = await options.listAccountIds();
-        for (const accountId of ids.slice(0, options.config().priming.maximumPerSweep)) {
+        let attempts = 0;
+        for (const accountId of ids) {
           if (foregroundActive) {
             break;
           }
-          await primeAccount(accountId);
+          const result = await primeAccount(accountId);
+          if (
+            result.status === "confirmed" ||
+            result.status === "inconclusive" ||
+            result.status === "failed"
+          ) {
+            attempts += 1;
+          }
+          if (attempts >= options.config().priming.maximumPerSweep) {
+            break;
+          }
         }
-      })().finally(() => {
-        background = undefined;
-      });
+      })()
+        .catch((error) => {
+          if (error instanceof PrimingInterruptedError) {
+            return;
+          }
+          try {
+            options.onBackgroundError?.(error);
+          } catch {}
+        })
+        .finally(() => {
+          background = undefined;
+        });
     },
 
     async shutdown() {
-      activeAbort?.abort(new Error("Pi session is shutting down"));
+      activeAbort?.abort(new PrimingInterruptedError("Pi session is shutting down"));
       await background?.catch(() => undefined);
     },
   };

@@ -37,6 +37,11 @@ export interface AccountVault {
   list(): Promise<ReadonlyArray<ManagedCodexAccountSummary>>;
   addFromOAuth(label: string, credentials: OAuthCredentials): Promise<string>;
   getFreshCredential(id: string, signal?: AbortSignal): Promise<FreshCredential>;
+  forceRefreshCredential(
+    id: string,
+    rejectedAccessToken: string,
+    signal?: AbortSignal,
+  ): Promise<FreshCredential>;
   remove(id: string): Promise<void>;
   rename(id: string, label: string): Promise<void>;
   markNeedsReauth(id: string, reason: AuthInvalidationReason): Promise<void>;
@@ -93,13 +98,20 @@ export function createAccountVault(options: AccountVaultOptions): AccountVault {
     expiresAt: account.expiresAt,
   });
 
-  const refreshAccount = async (id: string, signal?: AbortSignal): Promise<FreshCredential> =>
+  const refreshAccount = async (
+    id: string,
+    signal?: AbortSignal,
+    rejectedAccessToken?: string,
+  ): Promise<FreshCredential> =>
     withAccountRefreshLock(options, id, signal, async () => {
       const account = await findAccount(id);
       if (account.needsReauth) {
         throw new AccountNeedsReauthError();
       }
-      if (!needsRefresh(account.expiresAt, options.clock())) {
+      if (
+        (rejectedAccessToken !== undefined && account.accessToken !== rejectedAccessToken) ||
+        (rejectedAccessToken === undefined && !needsRefresh(account.expiresAt, options.clock()))
+      ) {
         return toFreshCredential(account);
       }
 
@@ -155,6 +167,20 @@ export function createAccountVault(options: AccountVaultOptions): AccountVault {
       return toFreshCredential(saved);
     });
 
+  const startRefresh = (
+    id: string,
+    signal?: AbortSignal,
+    rejectedAccessToken?: string,
+  ): Promise<FreshCredential> => {
+    const refresh = refreshAccount(id, signal, rejectedAccessToken).finally(() => {
+      if (refreshes.get(id) === refresh) {
+        refreshes.delete(id);
+      }
+    });
+    refreshes.set(id, refresh);
+    return refresh;
+  };
+
   return {
     async list() {
       const file = await options.store.read();
@@ -208,13 +234,18 @@ export function createAccountVault(options: AccountVaultOptions): AccountVault {
       if (pending) {
         return pending;
       }
-      const refresh = refreshAccount(id, signal).finally(() => {
-        if (refreshes.get(id) === refresh) {
-          refreshes.delete(id);
+      return startRefresh(id, signal);
+    },
+
+    async forceRefreshCredential(id, rejectedAccessToken, signal) {
+      const pending = refreshes.get(id);
+      if (pending) {
+        const credential = await pending;
+        if (credential.accessToken !== rejectedAccessToken) {
+          return credential;
         }
-      });
-      refreshes.set(id, refresh);
-      return refresh;
+      }
+      return startRefresh(id, signal, rejectedAccessToken);
     },
 
     async remove(id) {

@@ -22,7 +22,7 @@ The extension does not import cookies, execute provider CLIs, or accept an envir
 
 JSON stores write a same-directory `0600` temporary file, flush it, atomically rename it, chmod the result, and sync the directory where supported. Writers lock a private lock target, reload after acquiring the lock, validate with a strict schema, and time out visibly after bounded contention.
 
-OAuth refresh has an in-process single-flight and an account-specific cross-process lock. After taking the lock, a controller reloads credentials so it can reuse a refresh already completed by another process. Reservations similarly combine selection and lease acquisition in one state-file critical section.
+OAuth refresh has an in-process single-flight and an account-specific cross-process lock. After taking the lock, a controller reloads credentials so it can reuse a refresh already completed by another process. Reservations similarly combine selection and lease acquisition in one state-file critical section, then renew active foreground and primer leases until release.
 
 The event log is bounded to 4 MiB and retains only one rotated predecessor. Logging failures never expose credentials or break a routed request.
 

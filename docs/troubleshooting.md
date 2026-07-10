@@ -23,7 +23,7 @@ Start with:
 | `manual_account_unavailable` | Reauthenticate/clear the account's block, wait for its reservation, or run `/quota-router use auto`. |
 | `not_authorized` from prime | Invoke `/quota-router prime ...` interactively and accept both confirmations. |
 | `not_candidate` from prime | The account is already confirmed, is not untouched, or is inside the one-hour primer retry cooldown. |
-| `reserved` from prime | Another foreground/primer request owns the account or another process owns the singleton sweep. Wait two minutes or verify peers before resetting reservations. |
+| `reserved` from prime | Another foreground/primer request owns the account or another process owns the singleton sweep. Wait for active work to finish; a crashed owner's lease expires within two minutes. |
 | `busy` from prime | Foreground agent work is active. Wait until Pi settles. |
 | `inconclusive` from prime | No weekly reset appeared after the minimal request. Wait one hour; do not assume the rolling-window behavior. |
 | `failed` from prime | The minimal provider request failed. Check connectivity/authentication, then retry after one hour. |
@@ -48,7 +48,7 @@ Start with:
 
 A quota/auth failure before text, thinking, or tool-call output may rotate transparently up to five attempts. A lone transport `start` is not visible output. Once any visible/model-action output begins, the router forwards the error and never replays; retry the turn manually after resolving the account.
 
-Ctrl-C/Escape aborts usage work and all-limited recovery waits. If a process was killed ungracefully, foreground reservations expire after two minutes.
+Ctrl-C/Escape aborts usage work and all-limited recovery waits. Active reservations renew until completion; if a process is killed ungracefully, renewal stops and its reservations expire within two minutes.
 
 ## Installation problems
 

@@ -1,4 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import {
+  AccountNeedsReauthError,
+  TokenRefreshTransientError,
+} from "../../src/accounts/account-vault.ts";
 import { classifyFailure } from "../../src/recovery/failure-classifier.ts";
 
 const NOW = 2_000_000_000_000;
@@ -31,5 +35,15 @@ describe("failure classifier", () => {
       retryAt: NOW + 60_000,
     });
     expect(classifyFailure(new Error("bad request"), NOW)).toEqual({ kind: "fatal" });
+  });
+
+  test("classifies sanitized credential errors by their typed names", () => {
+    expect(classifyFailure(new AccountNeedsReauthError(), NOW)).toEqual({
+      kind: "auth-invalid",
+    });
+    expect(classifyFailure(new TokenRefreshTransientError(), NOW)).toEqual({
+      kind: "transient",
+      retryAt: NOW + 60_000,
+    });
   });
 });

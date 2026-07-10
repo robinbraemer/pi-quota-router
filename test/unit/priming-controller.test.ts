@@ -38,6 +38,11 @@ async function setup(options?: {
   authorized?: boolean;
   refreshed?: UsageSnapshot;
   execute?: (request: PrimerRequest, signal: AbortSignal) => Promise<void>;
+  accountIds?: string[];
+  listError?: Error;
+  onBackgroundError?: (error: unknown) => void;
+  reservationTtlMs?: number;
+  clock?: () => number;
 }) {
   const fixture = await createStorageFixture();
   cleanups.push(fixture.cleanup);
@@ -51,6 +56,7 @@ async function setup(options?: {
   const controller = createPrimingController({
     config: () => ({
       ...defaultConfig,
+      reservationTtlMs: options?.reservationTtlMs ?? defaultConfig.reservationTtlMs,
       priming: {
         ...defaultConfig.priming,
         enabled: options?.authorized ?? false,
@@ -65,15 +71,21 @@ async function setup(options?: {
         return reads === 1 ? untouched() : (options?.refreshed ?? untouched());
       },
     },
-    listAccountIds: async () => ["a"],
+    listAccountIds: async () => {
+      if (options?.listError) {
+        throw options.listError;
+      }
+      return options?.accountIds ?? ["a"];
+    },
     executePrimer: async (request, signal) => {
       requests.push(request);
       await options?.execute?.(request, signal);
     },
-    clock: () => NOW,
+    clock: options?.clock ?? (() => NOW),
     owner: { processId: 1, sessionId: "s", requestId: "primer" },
     currentModelId: () => "gpt-test",
     lowestReasoning: () => "minimal",
+    ...(options?.onBackgroundError ? { onBackgroundError: options.onBackgroundError } : {}),
   });
   return { controller, store, requests };
 }
@@ -121,4 +133,91 @@ describe("PrimingController", () => {
     expect(await controller.primeAccount("a")).toEqual({ status: "busy" });
     expect(requests).toHaveLength(0);
   });
+
+  test("applies the sweep limit to primer attempts instead of account positions", async () => {
+    const { controller, store, requests } = await setup({
+      authorized: true,
+      accountIds: ["a", "b"],
+      refreshed: untouched(NOW + 604_800_000),
+    });
+    await store.update((state) => ({
+      ...state,
+      priming: { ...state.priming, confirmedAccountIds: ["a"] },
+    }));
+
+    controller.scheduleSweep("idle");
+    await waitUntil(() => requests.length === 1);
+    await controller.shutdown();
+
+    expect(requests[0]?.accountId).toBe("b");
+  });
+
+  test("reports unexpected detached sweep failures", async () => {
+    const errors: unknown[] = [];
+    const failure = new Error("list failed");
+    const { controller } = await setup({
+      authorized: true,
+      listError: failure,
+      onBackgroundError: (error) => errors.push(error),
+    });
+
+    controller.scheduleSweep("idle");
+    await waitUntil(() => errors.length === 1);
+    await controller.shutdown();
+
+    expect(errors).toEqual([failure]);
+  });
+
+  test("handles foreground cancellation of a detached primer", async () => {
+    const errors: unknown[] = [];
+    let started = false;
+    const { controller } = await setup({
+      authorized: true,
+      onBackgroundError: (error) => errors.push(error),
+      execute: async (_request, signal) => {
+        started = true;
+        await new Promise<void>((_resolve, reject) => {
+          signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+        });
+      },
+    });
+
+    controller.scheduleSweep("idle");
+    await waitUntil(() => started);
+    controller.setForegroundActive(true);
+    await Bun.sleep(10);
+    await controller.shutdown();
+
+    expect(errors).toEqual([]);
+  });
+
+  test("renews primer leases for the full primer request", async () => {
+    const { controller, store } = await setup({
+      authorized: true,
+      reservationTtlMs: 60,
+      clock: Date.now,
+      execute: async () => {
+        await Bun.sleep(140);
+      },
+    });
+
+    const result = controller.primeAccount("a");
+    await Bun.sleep(100);
+    const reservations = (await store.read()).reservations;
+
+    expect(reservations).toHaveLength(2);
+    expect(reservations.every((reservation) => reservation.expiresAt > Date.now())).toBeTrue();
+    await result;
+    expect((await store.read()).reservations).toEqual([]);
+  });
 });
+
+async function waitUntil(predicate: () => boolean): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (predicate()) {
+      return;
+    }
+    await Bun.sleep(2);
+  }
+  throw new Error("condition was not reached");
+}

@@ -37,18 +37,27 @@ function dependencies(accounts: string[], baseStream: RoutedStreamDependencies["
   const selected: string[] = [];
   const released: string[] = [];
   const recorded: string[] = [];
+  const renewed: string[] = [];
   const value: RoutedStreamDependencies = {
     selectAndReserve: async ({ excludedAccountIds }) => {
       const accountId = accounts.find((account) => !excludedAccountIds.has(account));
       if (!accountId) {
-        return undefined;
+        return { kind: "unavailable", reason: "no_eligible_accounts", recoverableAccountIds: [] };
       }
       selected.push(accountId);
-      return { accountId, leaseToken: `lease-${accountId}` };
+      return {
+        kind: "selected",
+        lease: { accountId, leaseToken: `lease-${accountId}`, reservationTtlMs: 120_000 },
+      };
     },
     getFreshCredential: async (accountId) => ({
       accountId: `raw-${accountId}`,
       accessToken: `token-${accountId}`,
+      expiresAt: 3_000_000_000_000,
+    }),
+    forceRefreshCredential: async (accountId) => ({
+      accountId: `raw-${accountId}`,
+      accessToken: `refreshed-${accountId}`,
       expiresAt: 3_000_000_000_000,
     }),
     baseStream,
@@ -59,10 +68,14 @@ function dependencies(accounts: string[], baseStream: RoutedStreamDependencies["
     release: async (leaseToken) => {
       released.push(leaseToken);
     },
+    renew: async (leaseToken) => {
+      renewed.push(leaseToken);
+      return true;
+    },
     waitForRecovery: async () => undefined,
-    maxAttempts: 5,
+    maxAttempts: () => 5,
   };
-  return { value, selected, released, recorded };
+  return { value, selected, released, recorded, renewed };
 }
 
 describe("RoutedStream", () => {
@@ -111,7 +124,93 @@ describe("RoutedStream", () => {
 
     expect(events.map((event) => event.type)).toEqual(["start", "text_start", "error"]);
     expect(setup.selected).toEqual(["a"]);
+    expect(setup.recorded).toEqual(["a"]);
+  });
+
+  test("never rotates when an iterator throws after visible output", async () => {
+    const setup = dependencies(["a", "b"], (() => {
+      const stream = (async function* () {
+        yield start();
+        yield { type: "text_start", contentIndex: 0, partial: message() } as AssistantMessageEvent;
+        throw new Error("usage limit reached");
+      })();
+      return stream;
+    }) as unknown as RoutedStreamDependencies["baseStream"]);
+
+    const events = await collect(createRoutedStream(setup.value)(model, context));
+
+    expect(events.map((event) => event.type)).toEqual(["start", "text_start", "error"]);
+    expect(setup.selected).toEqual(["a"]);
+    expect(setup.recorded).toEqual(["a"]);
+  });
+
+  test("force refreshes the first generic 401 and retries the same account", async () => {
+    const keys: string[] = [];
+    const setup = dependencies(["a", "b"], (_model, _context, options) => {
+      keys.push(options?.apiKey ?? "");
+      return options?.apiKey === "token-a"
+        ? eventStream([
+            start(),
+            { type: "error", reason: "error", error: message("error", "unauthorized") },
+          ])
+        : eventStream(successfulText());
+    });
+    setup.value.classifyFailure = (error) =>
+      error instanceof Object && "errorMessage" in error
+        ? { kind: "auth-retry" }
+        : classifyFailure(error, 2_000_000_000_000);
+
+    const events = await collect(createRoutedStream(setup.value)(model, context));
+
+    expect(events.at(-1)?.type).toBe("done");
+    expect(setup.selected).toEqual(["a"]);
+    expect(keys).toEqual(["token-a", "refreshed-a"]);
     expect(setup.recorded).toEqual([]);
+  });
+
+  test("records a recoverable failure on the final attempt", async () => {
+    const setup = dependencies(["a"], () => eventStream([start(), quotaError()]));
+    setup.value.maxAttempts = () => 1;
+
+    await collect(createRoutedStream(setup.value)(model, context));
+
+    expect(setup.recorded).toEqual(["a"]);
+  });
+
+  test("surfaces a non-recoverable selection decision without retrying", async () => {
+    const setup = dependencies([], () => eventStream(successfulText()));
+    let waits = 0;
+    setup.value.waitForRecovery = async () => {
+      waits += 1;
+    };
+
+    const events = await collect(createRoutedStream(setup.value)(model, context));
+
+    expect(events).toHaveLength(1);
+    expect(events[0]?.type).toBe("error");
+    expect(waits).toBe(0);
+  });
+
+  test("renews a lease while a request remains active", async () => {
+    const setup = dependencies(["a"], (() => {
+      const stream = (async function* () {
+        yield start();
+        await Bun.sleep(30);
+        for (const event of successfulText().slice(1)) {
+          yield event;
+        }
+      })();
+      return stream;
+    }) as unknown as RoutedStreamDependencies["baseStream"]);
+    setup.value.selectAndReserve = async () => ({
+      kind: "selected",
+      lease: { accountId: "a", leaseToken: "lease-a", reservationTtlMs: 15 },
+    });
+
+    const events = await collect(createRoutedStream(setup.value)(model, context));
+
+    expect(events.at(-1)?.type).toBe("done");
+    expect(setup.renewed.length).toBeGreaterThan(0);
   });
 
   test("enforces the maximum rotation attempt count", async () => {

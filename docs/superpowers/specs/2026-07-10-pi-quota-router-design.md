@@ -209,6 +209,7 @@ The provider override is the only component coupled to Pi's streaming types. Sel
 - Persists short account leases in non-secret state.
 - Keys leases by account id, process id, session id, and request id.
 - Excludes leases owned by other live requests.
+- Renews foreground and primer leases while their work remains active.
 - Expires abandoned leases after two minutes.
 - Acquires the chosen lease inside the same write lock used to re-check candidates.
 

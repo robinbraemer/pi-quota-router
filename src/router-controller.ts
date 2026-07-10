@@ -83,6 +83,7 @@ export async function createRouterController(
   const eventLog = createEventLog({ path: options.paths.log });
   const usage = createUsageService({
     clock,
+    freshnessMs: () => cachedConfig.usageFreshnessMs,
     fetchUsage: async (accountId, signal) => {
       const credential = await vault.getFreshCredential(accountId, signal);
       return fetchCodexUsage({
@@ -138,6 +139,17 @@ export async function createRouterController(
     },
     currentModelId: () => currentModelId,
     lowestReasoning: () => "minimal",
+    onBackgroundError: (error) => {
+      if (loggingEnabled) {
+        void eventLog
+          .append({
+            type: "primer_inconclusive",
+            at: clock(),
+            detail: { failure: error instanceof Error ? error.name : "unknown" },
+          })
+          .catch(() => undefined);
+      }
+    },
   });
 
   const routedStream = createRoutedStream({
@@ -200,22 +212,39 @@ export async function createRouterController(
             detail: { reason: selected.decision.reason },
           });
         }
-        return selected.reservation;
+        return {
+          kind: "selected",
+          lease: {
+            accountId: selected.reservation.accountId,
+            leaseToken: selected.reservation.leaseToken,
+            reservationTtlMs: config.reservationTtlMs,
+          },
+        };
       }
-      return undefined;
+      return {
+        kind: "unavailable",
+        reason: selected.decision.reason,
+        recoverableAccountIds: selected.recoverableAccountIds,
+      };
     },
     getFreshCredential: (accountId, signal) => vault.getFreshCredential(accountId, signal),
+    forceRefreshCredential: (accountId, rejectedAccessToken, signal) =>
+      vault.forceRefreshCredential(accountId, rejectedAccessToken, signal),
     baseStream: options.baseStream,
     classifyFailure: (error) => classifyFailure(error, clock()),
     async recordFailure(accountId, failure: FailureClass) {
       if (failure.kind === "auth-invalid") {
         await vault.markNeedsReauth(accountId, "invalid_grant");
       }
+      const snapshot =
+        failure.kind === "quota"
+          ? await usage.get(accountId, { force: true }).catch(() => usage.peek(accountId))
+          : usage.peek(accountId);
       await stateStore.update((state) => ({
         ...state,
         blocks: [
           ...state.blocks.filter((block) => block.accountId !== accountId),
-          blockFromFailure(accountId, failure, usage.peek(accountId), clock()),
+          blockFromFailure(accountId, failure, snapshot, clock()),
         ],
       }));
       if (loggingEnabled) {
@@ -229,13 +258,16 @@ export async function createRouterController(
       usage.invalidate(accountId);
     },
     release: (leaseToken) => reservations.release(leaseToken).then(() => undefined),
-    waitForRecovery: (signal) =>
+    renew: (leaseToken, ttlMs) => reservations.renew(leaseToken, clock(), ttlMs),
+    waitForRecovery: (accountIds, signal) =>
       waitForRecovery({
         stateStore,
         clock,
+        accountIds,
+        maxWaitMs: cachedConfig.maxRecoveryWaitMs,
         ...(signal ? { signal } : {}),
       }),
-    maxAttempts: defaultConfig.maxRotationAttempts,
+    maxAttempts: () => cachedConfig.maxRotationAttempts,
   });
 
   const statusText = async (): Promise<string> => {
@@ -354,8 +386,20 @@ export async function createRouterController(
         vault.list(),
       ]);
       const healthy =
-        vaultStatus.valid && configStatus.valid && stateStatus.valid ? "healthy" : "invalid";
-      return `Quota router is ${healthy}; ${accounts.length} account(s); files mode 0600.`;
+        vaultStatus.valid &&
+        configStatus.valid &&
+        stateStatus.valid &&
+        vaultStatus.mode === 0o600 &&
+        configStatus.mode === 0o600 &&
+        stateStatus.mode === 0o600
+          ? "healthy"
+          : "invalid";
+      const modes = [
+        `accounts.json=${formatMode(vaultStatus.mode)}`,
+        `config.json=${formatMode(configStatus.mode)}`,
+        `state.json=${formatMode(stateStatus.mode)}`,
+      ].join(", ");
+      return `Quota router is ${healthy}; ${accounts.length} account(s); files mode ${modes}.`;
     },
     async paths() {
       return [
@@ -392,4 +436,8 @@ export async function createRouterController(
       await priming.shutdown();
     },
   };
+}
+
+function formatMode(mode: number | undefined): string {
+  return mode === undefined ? "missing" : mode.toString(8).padStart(4, "0");
 }

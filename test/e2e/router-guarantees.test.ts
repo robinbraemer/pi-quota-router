@@ -360,21 +360,40 @@ function routedDependencies(baseStream: RoutedStreamDependencies["baseStream"]):
     dependencies: {
       selectAndReserve: async ({ excludedAccountIds }) => {
         const accountId = accounts.find((value) => !excludedAccountIds.has(value));
-        if (!accountId) return undefined;
+        if (!accountId) {
+          return {
+            kind: "unavailable",
+            reason: "no_eligible_accounts",
+            recoverableAccountIds: [],
+          };
+        }
         selected.push(accountId);
-        return { accountId, leaseToken: `lease-${accountId}` };
+        return {
+          kind: "selected",
+          lease: {
+            accountId,
+            leaseToken: `lease-${accountId}`,
+            reservationTtlMs: defaultConfig.reservationTtlMs,
+          },
+        };
       },
       getFreshCredential: async (accountId) => ({
         accountId,
         accessToken: `token-${accountId}`,
         expiresAt: NOW + 3_600_000,
       }),
+      forceRefreshCredential: async (accountId) => ({
+        accountId,
+        accessToken: `refreshed-${accountId}`,
+        expiresAt: NOW + 3_600_000,
+      }),
       baseStream,
       classifyFailure: (error) => classifyFailure(error, NOW),
       recordFailure: async () => undefined,
       release: async () => undefined,
+      renew: async () => true,
       waitForRecovery: async () => undefined,
-      maxAttempts: defaultConfig.maxRotationAttempts,
+      maxAttempts: () => defaultConfig.maxRotationAttempts,
     },
   };
 }

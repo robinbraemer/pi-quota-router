@@ -20,6 +20,12 @@ export function classifyFailure(error: unknown, now: number): FailureClass {
   if (name === "aborterror" || code === "abort_err" || code === "aborted") {
     return { kind: "aborted" };
   }
+  if (name === "accountneedsreautherror") {
+    return { kind: "auth-invalid" };
+  }
+  if (name === "tokenrefreshtransienterror") {
+    return { kind: "transient", retryAt: now + 60_000 };
+  }
   if (
     code === "invalid_grant" ||
     code === "token_revoked" ||
@@ -28,7 +34,7 @@ export function classifyFailure(error: unknown, now: number): FailureClass {
   ) {
     return { kind: "auth-invalid" };
   }
-  if (status === 401) {
+  if (status === 401 || message.includes("401") || message.includes("unauthorized")) {
     return { kind: "auth-retry" };
   }
   if (

@@ -83,4 +83,58 @@ describe("waitForRecovery", () => {
       }),
     ).rejects.toThrow("cancelled");
   });
+
+  test("waits for a live reservation even when no account block exists", async () => {
+    let now = START;
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    const store = createAtomicJsonStore<RuntimeStateFile>({
+      path: fixture.file,
+      schema: RuntimeStateFileSchema,
+      createDefault: () => structuredClone(defaultRuntimeState),
+    });
+    await store.update((state) => ({
+      ...state,
+      reservations: [
+        {
+          accountId: "a",
+          leaseToken: "lease",
+          owner: { processId: 1, sessionId: "s", requestId: "r" },
+          createdAt: START,
+          expiresAt: START + 1000,
+          kind: "foreground",
+        },
+      ],
+    }));
+    let sleeps = 0;
+
+    await waitForRecovery({
+      stateStore: store,
+      accountIds: ["a"],
+      clock: () => now,
+      sleep: async (milliseconds) => {
+        sleeps += 1;
+        now += milliseconds;
+      },
+    });
+
+    expect(sleeps).toBe(1);
+  });
+
+  test("uses the configured maximum wait", async () => {
+    let now = START;
+    const store = await setup(START + 10_000);
+
+    await expect(
+      waitForRecovery({
+        stateStore: store,
+        clock: () => now,
+        maxWaitMs: 500,
+        sleep: async (milliseconds) => {
+          now += milliseconds;
+        },
+      }),
+    ).rejects.toBeInstanceOf(RecoveryWaitTimeoutError);
+    expect(now).toBe(START + 500);
+  });
 });
