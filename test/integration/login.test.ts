@@ -8,32 +8,9 @@ const AUTHORIZATION_URL =
   "https://auth.openai.com/oauth/authorize?response_type=code&client_id=codex-test&state=oauth-state";
 const OPEN_ACTION = "Open authorization URL in default browser";
 const COPY_ACTION = "Copy authorization URL";
-const MANUAL_ACTION = "Continue manually (URL shown above)";
+const MANUAL_ACTION = "Show authorization URL for manual use";
 
 describe("Codex command login", () => {
-  test("saves completed OAuth credentials while the handoff selector remains open", async () => {
-    let resolveSelection: ((selection: string | undefined) => void) | undefined;
-    const selection = new Promise<string | undefined>((resolve) => {
-      resolveSelection = resolve;
-    });
-    const harness = createLoginHarness(selection);
-
-    const result = await Promise.race([
-      performCodexLogin(harness.options),
-      Bun.sleep(100).then(() => {
-        throw new Error("login waited for authorization selector");
-      }),
-    ]);
-
-    expect(result).toEqual({
-      id: "codex-a",
-      label: "work",
-      message: "Added Codex account work (codex-a)",
-    });
-    expect(harness.added).toHaveLength(1);
-    resolveSelection?.(MANUAL_ACTION);
-  });
-
   test("offers explicit actions and opens only the validated authorization URL", async () => {
     const harness = createLoginHarness(OPEN_ACTION);
 
@@ -48,7 +25,7 @@ describe("Codex command login", () => {
 
     expect(harness.selectors).toEqual([
       {
-        title: "OpenAI Codex authorization",
+        title: "Codex authorization",
         options: [OPEN_ACTION, COPY_ACTION, MANUAL_ACTION],
       },
     ]);
@@ -75,6 +52,27 @@ describe("Codex command login", () => {
     expect(harness.copied.join(" ")).not.toContain(harness.credentials.refresh);
   });
 
+  test("races an abortable manual-code prompt with the browser callback", async () => {
+    const harness = createLoginHarness(COPY_ACTION);
+    let manualSignal: AbortSignal | undefined;
+    harness.ctx.ui.input = async (_message, _placeholder, dialogOptions) => {
+      manualSignal = dialogOptions?.signal;
+      return "manual-code";
+    };
+
+    await performCodexLogin({
+      ...harness.options,
+      login: async (callbacks) => {
+        callbacks.onAuth({ url: AUTHORIZATION_URL });
+        expect(await callbacks.onManualCodeInput?.()).toBe("manual-code");
+        return harness.credentials;
+      },
+    });
+
+    expect(manualSignal).toBeDefined();
+    expect(manualSignal?.aborted).toBe(true);
+  });
+
   test("preserves the visible URL when actions fail or selection is unavailable", async () => {
     for (const selection of [OPEN_ACTION, COPY_ACTION, new Error("no selector")]) {
       const harness = createLoginHarness(selection);
@@ -95,6 +93,16 @@ describe("Codex command login", () => {
       expect(harness.notices.at(-1)).toContain(AUTHORIZATION_URL);
       expect(harness.noticeTypes.at(-1)).toBe("warning");
     }
+  });
+
+  test("preserves a manual fallback when interactive selection is unavailable", async () => {
+    const harness = createLoginHarness(undefined);
+    delete (harness.ctx.ui as Partial<ExtensionCommandContext["ui"]>).select;
+
+    await performCodexLogin(harness.options);
+
+    expect(harness.notices.at(-1)).toContain(AUTHORIZATION_URL);
+    expect(harness.noticeTypes.at(-1)).toBe("warning");
   });
 
   test("rejects unsafe authorization URLs before launch, copy, or persistence", async () => {

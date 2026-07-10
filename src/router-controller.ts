@@ -377,20 +377,18 @@ export async function createRouterController(
         ...(label ? { label } : {}),
         vault,
         ...(options.login ? { login: options.login } : {}),
-        onAccountAdded: ({ id, label: addedLabel }) => {
+        onAccountAdded: async ({ id, label: addedLabel }) => {
+          await stateStore.update((state) => ({
+            ...state,
+            blocks: state.blocks.filter((block) => block.accountId !== id || block.kind !== "auth"),
+          }));
+          usage.invalidate(id);
           displayAccountId = id;
           currentLabel = addedLabel;
         },
       });
-      await stateStore.update((state) => ({
-        ...state,
-        blocks: state.blocks.filter(
-          (block) => block.accountId !== result.id || block.kind !== "auth",
-        ),
-      }));
       displayAccountId = result.id;
       currentLabel = result.label;
-      usage.invalidate(result.id);
       return result.message;
     },
     async use(selector) {

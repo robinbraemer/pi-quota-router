@@ -653,21 +653,25 @@ describe("RouterController", () => {
     await controller.shutdown();
   });
 
-  test("waits for recovery after the final candidate fails before output", async () => {
+  test("waits for recovery after every account fails in one request", async () => {
     const fixture = await createStorageFixture();
     cleanups.push(fixture.cleanup);
     const paths = resolveRouterPaths(fixture.directory);
+    let streamCalls = 0;
     const controller = await createRouterController({
       paths,
       clock: () => 2_000_000_000_000,
       oauth: { refresh: async () => makeCredentials("account-1", 3_000_000_000_000) },
       fetchImpl: async () => Response.json(completeUsageResponse),
-      baseStream: () =>
-        eventStream([
+      baseStream: () => {
+        streamCalls += 1;
+        return eventStream([
           { type: "error", reason: "error", error: message("error", "usage limit reached") },
-        ]),
+        ]);
+      },
     });
-    await controller.vault.addFromOAuth("work", makeCredentials("account-1", 3_000_000_000_000));
+    await controller.vault.addFromOAuth("first", makeCredentials("account-1", 3_000_000_000_000));
+    await controller.vault.addFromOAuth("second", makeCredentials("account-2", 3_000_000_000_000));
     const configStore = createAtomicJsonStore<RouterConfig>({
       path: paths.config,
       schema: RouterConfigSchema,
@@ -677,12 +681,13 @@ describe("RouterController", () => {
     });
     await configStore.update((config) => ({
       ...config,
-      maxRotationAttempts: 2,
       maxRecoveryWaitMs: 0,
+      maxRotationAttempts: 3,
     }));
 
     const events = await collectController(controller);
 
+    expect(streamCalls).toBe(2);
     expect(events[0]?.type).toBe("error");
     if (events[0]?.type === "error") {
       expect(events[0].error.errorMessage).toContain("configured wait limit");
@@ -733,6 +738,54 @@ describe("RouterController", () => {
       expect(events[0].reason).toBe("aborted");
     }
     await router.shutdown();
+  });
+
+  test("clears an account auth block after successful reauthentication", async () => {
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    const paths = resolveRouterPaths(fixture.directory);
+    const credentials = makeCredentials("account-1", 3_000_000_000_000);
+    const controller = await createRouterController({
+      paths,
+      clock: () => 2_000_000_000_000,
+      oauth: { refresh: async () => credentials },
+      login: async (callbacks) => {
+        callbacks.onAuth({
+          url: "https://auth.openai.com/oauth/authorize?response_type=code&client_id=codex-test&state=oauth-state",
+        });
+        return credentials;
+      },
+      fetchImpl: async () => Response.json(completeUsageResponse),
+      baseStream: () => eventStream(successfulText()),
+    });
+    const accountId = await controller.vault.addFromOAuth("work", credentials);
+    const stateStore = createAtomicJsonStore<RuntimeStateFile>({
+      path: paths.state,
+      schema: RuntimeStateFileSchema,
+      createDefault: () => structuredClone(defaultRuntimeState),
+    });
+    await stateStore.update((state) => ({
+      ...state,
+      blocks: [
+        {
+          accountId,
+          kind: "auth",
+          blockedAt: 2_000_000_000_000,
+          estimated: false,
+        },
+      ],
+    }));
+
+    await controller.operations.login("work", {
+      ui: {
+        notify: () => undefined,
+        select: async () => "Show authorization URL for manual use",
+        input: async () => "manual-code",
+      },
+    } as never);
+
+    expect((await stateStore.read()).blocks).toEqual([]);
+    await controller.shutdown();
   });
 
   test("reports unsafe persisted file modes as invalid", async () => {

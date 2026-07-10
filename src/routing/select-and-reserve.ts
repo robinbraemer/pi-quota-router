@@ -33,26 +33,30 @@ export async function selectAndReserve(input: {
         ...(reservation ? { reservation } : {}),
       };
     });
-    const eligibleForAttempt = input.excludedAccountIds
-      ? candidates.filter((candidate) => !input.excludedAccountIds?.has(candidate.accountId))
-      : candidates;
-    const decision = selectAccount({
+    const selectableCandidates = candidates.filter(
+      (candidate) => !input.excludedAccountIds?.has(candidate.accountId),
+    );
+    const recoveryDecision = selectAccount({
       ...input.request,
-      candidates: eligibleForAttempt,
+      candidates,
       now: input.now,
     });
-    const recoverableAccountIds = candidates
-      .filter((candidate) => {
-        const explanation = decision.candidates.find(
-          (value) => value.accountId === candidate.accountId,
-        );
-        const excluded = input.excludedAccountIds?.has(candidate.accountId) ?? false;
+    const decision = input.excludedAccountIds?.size
+      ? selectAccount({
+          ...input.request,
+          candidates: selectableCandidates,
+          now: input.now,
+        })
+      : recoveryDecision;
+    const recoverableAccountIds = recoveryDecision.candidates
+      .filter((explanation) => {
+        const candidate = candidates.find((value) => value.accountId === explanation.accountId);
         return (
-          ((excluded || explanation?.rejectionCode === "blocked") &&
-            candidate.block?.retryAt !== undefined &&
+          (explanation.rejectionCode === "blocked" &&
+            candidate?.block?.retryAt !== undefined &&
             candidate.block.retryAt > input.now) ||
-          ((excluded || explanation?.rejectionCode === "reserved") &&
-            candidate.reservation !== undefined &&
+          (explanation.rejectionCode === "reserved" &&
+            candidate?.reservation !== undefined &&
             candidate.reservation.expiresAt > input.now)
         );
       })
