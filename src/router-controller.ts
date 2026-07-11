@@ -7,7 +7,7 @@ import type {
 } from "@earendil-works/pi-ai";
 import type { AccountVault, CodexOAuthClient } from "./accounts/account-vault.ts";
 import { AccountNeedsReauthError, createAccountVault } from "./accounts/account-vault.ts";
-import { codexModels, codexModelsById } from "./codex-runtime.ts";
+import { closeCodexWebSocketSessions, codexModels, codexModelsById } from "./codex-runtime.ts";
 import type { QuotaRouterOperations } from "./commands/commands.ts";
 import { type CodexLoginImplementation, performCodexLogin } from "./commands/login.ts";
 import { defaultConfig } from "./config.ts";
@@ -35,6 +35,7 @@ import {
   type RuntimeStateFile,
   RuntimeStateFileSchema,
 } from "./storage/schemas.ts";
+import { createAccountAffinityCoordinator } from "./stream/account-affinity.ts";
 import { createRoutedStream } from "./stream/routed-stream.ts";
 import type { Candidate, RouterConfig, UsageSnapshot } from "./types.ts";
 import {
@@ -59,6 +60,7 @@ export interface RouterControllerOptions {
   login?: CodexLoginImplementation;
   fetchImpl?: FetchImplementation;
   baseStream: StreamFunction<"openai-codex-responses", SimpleStreamOptions>;
+  closeSessionWebSockets?: (sessionId?: string) => void;
 }
 
 function routingSessionKey(sessionId: string | undefined): string {
@@ -86,6 +88,9 @@ export async function createRouterController(
     createDefault: () => structuredClone(defaultRuntimeState),
   });
   const [initialConfig, initialState] = await Promise.all([configStore.read(), stateStore.read()]);
+  const accountAffinity = createAccountAffinityCoordinator(
+    options.closeSessionWebSockets ?? closeCodexWebSocketSessions,
+  );
   let cachedConfig = initialConfig;
   const vault = createAccountVault({
     store: vaultStore,
@@ -251,6 +256,7 @@ export async function createRouterController(
   });
 
   const routedStream = createRoutedStream({
+    accountAffinity,
     async selectAndReserve(request) {
       currentModelId = request.model.id;
       const [summaries, config, state] = await Promise.all([
@@ -601,6 +607,7 @@ export async function createRouterController(
     },
     async shutdown() {
       lastSuccessfulAccountBySession.clear();
+      accountAffinity.shutdown();
       await priming.shutdown();
     },
   };

@@ -779,6 +779,10 @@ function routedDependencies(baseStream: RoutedStreamDependencies["baseStream"]):
   return {
     selected,
     dependencies: {
+      accountAffinity: {
+        acquire: async () => ({ beforeAttempt: () => undefined, release: () => undefined }),
+        shutdown: () => undefined,
+      },
       selectAndReserve: async ({ excludedAccountIds }) => {
         const accountId = accounts.find((value) => !excludedAccountIds.has(value));
         if (!accountId) {

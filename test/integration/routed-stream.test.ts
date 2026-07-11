@@ -41,6 +41,10 @@ function dependencies(accounts: string[], baseStream: RoutedStreamDependencies["
   const succeeded: Array<[string, string | undefined]> = [];
   const renewed: string[] = [];
   const value: RoutedStreamDependencies = {
+    accountAffinity: {
+      acquire: async () => ({ beforeAttempt: () => undefined, release: () => undefined }),
+      shutdown: () => undefined,
+    },
     selectAndReserve: async ({ excludedAccountIds }) => {
       const accountId = accounts.find((account) => !excludedAccountIds.has(account));
       if (!accountId) {
@@ -122,6 +126,49 @@ describe("RoutedStream", () => {
         sessionId: "  session-1  ",
       }),
     );
+  });
+
+  test("prepares every provider attempt immediately before the built-in stream", async () => {
+    const order: string[] = [];
+    const setup = dependencies(["a", "b"], (_model, _context, options) => {
+      const account = options?.apiKey === "token-a" ? "a" : "b";
+      order.push(`stream:${account}`);
+      return account === "a" ? eventStream([start(), quotaError()]) : eventStream(successfulText());
+    });
+    setup.value.accountAffinity = {
+      acquire: async () => ({
+        beforeAttempt: (accountId) => order.push(`prepare:${accountId}`),
+        release: () => order.push("release"),
+      }),
+      shutdown: () => undefined,
+    };
+
+    await collect(createRoutedStream(setup.value)(model, context, { sessionId: "original" }));
+
+    expect(order).toEqual(["prepare:a", "stream:a", "prepare:b", "stream:b", "release"]);
+  });
+
+  test("surfaces cancellation while waiting for session ownership without selecting an account", async () => {
+    const abort = new AbortController();
+    const setup = dependencies(["a"], () => eventStream(successfulText()));
+    setup.value.accountAffinity = {
+      acquire: async (_sessionId, signal) => {
+        await new Promise<void>((_resolve, reject) => {
+          signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+        });
+        throw new Error("unreachable");
+      },
+      shutdown: () => undefined,
+    };
+    const pending = collect(
+      createRoutedStream(setup.value)(model, context, {
+        sessionId: "original",
+        signal: abort.signal,
+      }),
+    );
+    abort.abort(new Error("synthetic cancellation"));
+    expect((await pending).at(-1)?.type).toBe("error");
+    expect(setup.selected).toEqual([]);
   });
 
   test("never rotates after visible model output begins", async () => {
@@ -238,8 +285,10 @@ describe("RoutedStream", () => {
 
   test("force refreshes the first generic 401 and retries the same account", async () => {
     const keys: string[] = [];
+    const order: string[] = [];
     const setup = dependencies(["a", "b"], (_model, _context, options) => {
       keys.push(options?.apiKey ?? "");
+      order.push(`stream:${options?.apiKey}`);
       return options?.apiKey === "token-a"
         ? eventStream([
             start(),
@@ -251,12 +300,20 @@ describe("RoutedStream", () => {
       error instanceof Object && "errorMessage" in error
         ? { kind: "auth-retry" }
         : classifyFailure(error, 2_000_000_000_000);
+    setup.value.accountAffinity = {
+      acquire: async () => ({
+        beforeAttempt: (accountId) => order.push(`prepare:${accountId}`),
+        release: () => undefined,
+      }),
+      shutdown: () => undefined,
+    };
 
     const events = await collect(createRoutedStream(setup.value)(model, context));
 
     expect(events.at(-1)?.type).toBe("done");
     expect(setup.selected).toEqual(["a"]);
     expect(keys).toEqual(["token-a", "refreshed-a"]);
+    expect(order).toEqual(["prepare:a", "stream:token-a", "prepare:a", "stream:refreshed-a"]);
     expect(setup.recorded).toEqual([]);
   });
 

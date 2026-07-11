@@ -861,14 +861,19 @@ describe("RouterController", () => {
       markPeerStarted = resolve;
     });
     const keys = new Map<string, string[]>();
+    const affinityOrder: string[] = [];
     const controller = await createRouterController({
       paths,
       clock: () => 2_000_000_000_000,
       oauth: { refresh: async () => preferred },
       fetchImpl: async () => Response.json(completeUsageResponse),
+      closeSessionWebSockets: (sessionId) => affinityOrder.push(`close:${sessionId}`),
       baseStream: (_model, _context, options) => {
         const sessionId = options?.sessionId ?? "";
         keys.set(sessionId, [...(keys.get(sessionId) ?? []), options?.apiKey ?? ""]);
+        affinityOrder.push(
+          `stream:${sessionId}:${options?.apiKey === preferred.access ? "preferred" : "other"}`,
+        );
         if (sessionId === "peer") {
           peerStream = createAssistantMessageEventStream();
           markPeerStarted?.();
@@ -909,6 +914,11 @@ describe("RouterController", () => {
         "done",
       ]);
       expect(keys.get("failing")).toEqual([preferred.access, other.access]);
+      expect(affinityOrder.filter((entry) => entry.includes("failing"))).toEqual([
+        "stream:failing:preferred",
+        "close:failing",
+        "stream:failing:other",
+      ]);
       const during = await stateStore.read();
       expect(during.reservations.map((reservation) => reservation.leaseToken)).toEqual([peerToken]);
       expect(during.reservations[0]?.accountId).toBe(preferredId);
@@ -929,7 +939,7 @@ describe("RouterController", () => {
     const preferred = makeCredentials(preferredAccountId, 3_000_000_000_000, "preferred");
     const other = makeCredentials(otherAccountId, 3_000_000_000_000, "other");
     const routedTokens: string[] = [];
-    const controller = await createRouterController({
+    const options: RouterControllerOptions = {
       paths: resolveRouterPaths(fixture.directory),
       clock: () => 2_000_000_000_000,
       oauth: { refresh: async () => preferred },
@@ -938,7 +948,8 @@ describe("RouterController", () => {
         routedTokens.push(options?.apiKey ?? "");
         return eventStream(successfulText());
       },
-    });
+    };
+    const controller = await createRouterController(options);
     await controller.vault.addFromOAuth("preferred", preferred);
     const otherId = await controller.vault.addFromOAuth("other", other);
     await controller.operations.use(otherId);
@@ -946,7 +957,9 @@ describe("RouterController", () => {
     await controller.operations.use("auto");
     await controller.shutdown();
 
-    await collectController(controller, { sessionId: "s1" });
+    const restarted = await createRouterController(options);
+    await collectController(restarted, { sessionId: "s1" });
+    await restarted.shutdown();
 
     expect(routedTokens).toEqual([other.access, preferred.access]);
   });
