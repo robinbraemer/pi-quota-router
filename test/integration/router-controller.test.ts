@@ -611,6 +611,317 @@ describe("RouterController", () => {
     }
   }, 2_000);
 
+  test("coalesces credential refresh while same-account foreground streams overlap", async () => {
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    const original = makeCredentials("refresh-overlap", 1_999_999_999_999, "expired");
+    const refreshed = makeCredentials("refresh-overlap", 3_000_000_000_000, "refreshed");
+    let refreshes = 0;
+    const streams = new Map<string, ReturnType<typeof createAssistantMessageEventStream>>();
+    let markBothStarted: (() => void) | undefined;
+    const bothStarted = new Promise<void>((resolve) => {
+      markBothStarted = resolve;
+    });
+    let releaseRefresh: (() => void) | undefined;
+    const refreshHeld = new Promise<void>((resolve) => {
+      releaseRefresh = resolve;
+    });
+    const controller = await createRouterController({
+      paths: resolveRouterPaths(fixture.directory),
+      clock: () => 2_000_000_000_000,
+      oauth: {
+        refresh: async () => {
+          refreshes += 1;
+          await refreshHeld;
+          return refreshed;
+        },
+      },
+      fetchImpl: async () => Response.json(completeUsageResponse),
+      baseStream: (_model, _context, options) => {
+        const stream = createAssistantMessageEventStream();
+        streams.set(options?.sessionId ?? "", stream);
+        if (streams.size === 2) markBothStarted?.();
+        return stream;
+      },
+    });
+    const accountId = await controller.vault.addFromOAuth("overlap", original);
+    await controller.operations.use(accountId);
+    let credentialEntries = 0;
+    let markBothCredentialEntries: (() => void) | undefined;
+    const bothCredentialEntries = new Promise<void>((resolve) => {
+      markBothCredentialEntries = resolve;
+    });
+    const getFreshCredential = controller.vault.getFreshCredential.bind(controller.vault);
+    controller.vault.getFreshCredential = async (...args) => {
+      credentialEntries += 1;
+      if (credentialEntries === 2) markBothCredentialEntries?.();
+      return getFreshCredential(...args);
+    };
+    const first = collectController(controller, { sessionId: "refresh-one" });
+    const second = collectController(controller, { sessionId: "refresh-two" });
+    let streamsCompleted = false;
+    try {
+      await bothCredentialEntries;
+      expect(refreshes).toBe(1);
+      releaseRefresh?.();
+      await bothStarted;
+      for (const stream of streams.values()) {
+        for (const event of successfulText()) stream.push(event);
+      }
+      streamsCompleted = true;
+      const results = await Promise.all([first, second]);
+      expect(results.every((events) => events.at(-1)?.type === "done")).toBeTrue();
+      expect(refreshes).toBe(1);
+    } finally {
+      releaseRefresh?.();
+      if (!streamsCompleted) {
+        for (const stream of streams.values()) {
+          for (const event of successfulText()) stream.push(event);
+        }
+      }
+      await Promise.allSettled([first, second]);
+      await controller.shutdown();
+    }
+  }, 2_000);
+
+  test("keeps concurrent generic 401 refresh caller-local under overlap", async () => {
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    const paths = resolveRouterPaths(fixture.directory);
+    const original = makeCredentials("401-overlap", 3_000_000_000_000, "original");
+    const refreshed = makeCredentials("401-overlap", 3_000_000_000_000, "refreshed");
+    let refreshes = 0;
+    let markRefreshStarted: (() => void) | undefined;
+    const refreshStarted = new Promise<void>((resolve) => {
+      markRefreshStarted = resolve;
+    });
+    let releaseRefresh: (() => void) | undefined;
+    const refreshHeld = new Promise<void>((resolve) => {
+      releaseRefresh = resolve;
+    });
+    let originalAttempts = 0;
+    let markBothOriginal: (() => void) | undefined;
+    const bothOriginal = new Promise<void>((resolve) => {
+      markBothOriginal = resolve;
+    });
+    let releaseOriginal: (() => void) | undefined;
+    const originalHeld = new Promise<void>((resolve) => {
+      releaseOriginal = resolve;
+    });
+    const keys = new Map<string, string[]>();
+    const controller = await createRouterController({
+      paths,
+      clock: () => 2_000_000_000_000,
+      oauth: {
+        refresh: async () => {
+          refreshes += 1;
+          markRefreshStarted?.();
+          await refreshHeld;
+          return refreshed;
+        },
+      },
+      fetchImpl: async () => Response.json(completeUsageResponse),
+      baseStream: ((
+        _model: Model<"openai-codex-responses">,
+        _context: Context,
+        options?: SimpleStreamOptions,
+      ) => {
+        const sessionId = options?.sessionId ?? "";
+        keys.set(sessionId, [...(keys.get(sessionId) ?? []), options?.apiKey ?? ""]);
+        if (options?.apiKey !== original.access) return eventStream(successfulText());
+        return (async function* () {
+          originalAttempts += 1;
+          if (originalAttempts === 2) markBothOriginal?.();
+          await originalHeld;
+          yield { type: "start", partial: message() } as AssistantMessageEvent;
+          yield {
+            type: "error",
+            reason: "error",
+            error: message("error", "unauthorized"),
+          } as AssistantMessageEvent;
+        })();
+      }) as unknown as RouterControllerOptions["baseStream"],
+    });
+    await controller.vault.addFromOAuth("overlap", original);
+    let forceRefreshEntries = 0;
+    let markBothForceRefreshEntries: (() => void) | undefined;
+    const bothForceRefreshEntries = new Promise<void>((resolve) => {
+      markBothForceRefreshEntries = resolve;
+    });
+    const forceRefreshCredential = controller.vault.forceRefreshCredential.bind(controller.vault);
+    controller.vault.forceRefreshCredential = async (...args) => {
+      forceRefreshEntries += 1;
+      if (forceRefreshEntries === 2) markBothForceRefreshEntries?.();
+      return forceRefreshCredential(...args);
+    };
+    const abort = new AbortController();
+    const cancelled = collectController(controller, {
+      sessionId: "cancelled-401",
+      signal: abort.signal,
+    });
+    const peer = collectController(controller, { sessionId: "peer-401" });
+    try {
+      await bothOriginal;
+      const stateStore = createAtomicJsonStore<RuntimeStateFile>({
+        path: paths.state,
+        schema: RuntimeStateFileSchema,
+        createDefault: () => structuredClone(defaultRuntimeState),
+      });
+      const during = await stateStore.read();
+      expect(during.reservations).toHaveLength(2);
+      expect(new Set(during.reservations.map((value) => value.leaseToken)).size).toBe(2);
+      releaseOriginal?.();
+      await refreshStarted;
+      await bothForceRefreshEntries;
+      abort.abort(new Error("synthetic caller cancellation"));
+      releaseRefresh?.();
+      expect((await cancelled).at(-1)?.type).toBe("error");
+      expect((await peer).at(-1)?.type).toBe("done");
+      expect(refreshes).toBe(1);
+      expect(keys.get("cancelled-401")).toEqual([original.access]);
+      expect(keys.get("peer-401")).toEqual([original.access, refreshed.access]);
+      expect((await stateStore.read()).reservations).toEqual([]);
+      expect((await stateStore.read()).blocks).toEqual([]);
+    } finally {
+      abort.abort();
+      releaseOriginal?.();
+      releaseRefresh?.();
+      await Promise.allSettled([cancelled, peer]);
+      await controller.shutdown();
+    }
+  }, 2_000);
+
+  test("keeps headroom and manual policy authoritative with foreground peers", async () => {
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    const paths = resolveRouterPaths(fixture.directory);
+    const low = makeCredentials("headroom-low", 3_000_000_000_000, "low");
+    const safe = makeCredentials("headroom-safe", 3_000_000_000_000, "safe");
+    const routedKeys: string[] = [];
+    const controller = await createRouterController({
+      paths,
+      clock: () => 2_000_000_000_000,
+      oauth: { refresh: async () => low },
+      fetchImpl: async (_input, init) => {
+        const rawAccountId = new Headers(init?.headers).get("ChatGPT-Account-Id");
+        return Response.json({
+          ...completeUsageResponse,
+          rate_limit: {
+            ...completeUsageResponse.rate_limit,
+            secondary_window: {
+              ...completeUsageResponse.rate_limit.secondary_window,
+              used_percent: rawAccountId === "headroom-low" ? 99 : 20,
+            },
+          },
+        });
+      },
+      baseStream: (_model, _context, options) => {
+        routedKeys.push(options?.apiKey ?? "");
+        return eventStream(successfulText());
+      },
+    });
+    const lowId = await controller.vault.addFromOAuth("low", low);
+    const safeId = await controller.vault.addFromOAuth("safe", safe);
+    const stateStore = createAtomicJsonStore<RuntimeStateFile>({
+      path: paths.state,
+      schema: RuntimeStateFileSchema,
+      createDefault: () => structuredClone(defaultRuntimeState),
+    });
+    await stateStore.update((state) => ({
+      ...state,
+      reservations: [lowId, safeId].map((accountId, index) => ({
+        accountId,
+        leaseToken: `foreground-policy-peer-${index}`,
+        owner: { processId: 7, sessionId: `peer-${index}`, requestId: `peer-${index}` },
+        createdAt: 2_000_000_000_000,
+        expiresAt: 2_000_000_060_000,
+        kind: "foreground" as const,
+      })),
+    }));
+
+    await collectController(controller);
+    await controller.operations.use(lowId);
+    await collectController(controller);
+
+    expect(routedKeys).toEqual([safe.access, low.access]);
+    expect((await stateStore.read()).reservations).toHaveLength(2);
+    await controller.shutdown();
+  });
+
+  test("keeps replay-safe quota failover token-local while a foreground peer remains", async () => {
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    const paths = resolveRouterPaths(fixture.directory);
+    const { preferredAccountId, otherAccountId } = automaticTieAccountIds();
+    const preferred = makeCredentials(preferredAccountId, 3_000_000_000_000, "preferred");
+    const other = makeCredentials(otherAccountId, 3_000_000_000_000, "other");
+    let peerStream: ReturnType<typeof createAssistantMessageEventStream> | undefined;
+    let markPeerStarted: (() => void) | undefined;
+    const peerStarted = new Promise<void>((resolve) => {
+      markPeerStarted = resolve;
+    });
+    const keys = new Map<string, string[]>();
+    const controller = await createRouterController({
+      paths,
+      clock: () => 2_000_000_000_000,
+      oauth: { refresh: async () => preferred },
+      fetchImpl: async () => Response.json(completeUsageResponse),
+      baseStream: (_model, _context, options) => {
+        const sessionId = options?.sessionId ?? "";
+        keys.set(sessionId, [...(keys.get(sessionId) ?? []), options?.apiKey ?? ""]);
+        if (sessionId === "peer") {
+          peerStream = createAssistantMessageEventStream();
+          markPeerStarted?.();
+          return peerStream;
+        }
+        return options?.apiKey === preferred.access
+          ? eventStream([
+              { type: "start", partial: message() },
+              {
+                type: "error",
+                reason: "error",
+                error: message("error", "usage limit reached"),
+              },
+            ])
+          : eventStream(successfulText());
+      },
+    });
+    const preferredId = await controller.vault.addFromOAuth("preferred", preferred);
+    await controller.vault.addFromOAuth("other", other);
+    const peer = collectController(controller, { sessionId: "peer" });
+    try {
+      await peerStarted;
+      const stateStore = createAtomicJsonStore<RuntimeStateFile>({
+        path: paths.state,
+        schema: RuntimeStateFileSchema,
+        createDefault: () => structuredClone(defaultRuntimeState),
+      });
+      const peerToken = (await stateStore.read()).reservations.find(
+        (reservation) => reservation.owner.sessionId === "peer",
+      )?.leaseToken;
+      if (!peerToken) throw new Error("expected held peer lease token");
+      const failedOver = await collectController(controller, { sessionId: "failing" });
+      expect(failedOver.map((event) => event.type)).toEqual([
+        "start",
+        "text_start",
+        "text_delta",
+        "text_end",
+        "done",
+      ]);
+      expect(keys.get("failing")).toEqual([preferred.access, other.access]);
+      const during = await stateStore.read();
+      expect(during.reservations.map((reservation) => reservation.leaseToken)).toEqual([peerToken]);
+      expect(during.reservations[0]?.accountId).toBe(preferredId);
+      expect(during.blocks.some((block) => block.accountId === preferredId)).toBeTrue();
+    } finally {
+      if (peerStream) {
+        for (const event of successfulText()) peerStream.push(event);
+      }
+      await peer;
+      await controller.shutdown();
+    }
+  }, 2_000);
+
   test("clears successful session affinity on shutdown", async () => {
     const fixture = await createStorageFixture();
     cleanups.push(fixture.cleanup);

@@ -16,10 +16,13 @@ describe("ReplayBoundary", () => {
   for (const type of [
     "text_start",
     "text_delta",
+    "text_end",
     "thinking_start",
     "thinking_delta",
+    "thinking_end",
     "toolcall_start",
     "toolcall_delta",
+    "toolcall_end",
   ] as const) {
     test(`makes ${type} replay-unsafe`, () => {
       const boundary = new ReplayBoundary();

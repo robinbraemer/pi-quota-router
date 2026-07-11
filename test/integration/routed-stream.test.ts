@@ -211,6 +211,50 @@ describe("RoutedStream", () => {
     expect(setup.recorded).toEqual([]);
   });
 
+  test("retries concurrent generic 401 requests under their unchanged distinct leases", async () => {
+    const keys = new Map<string, string[]>();
+    const setup = dependencies(["a"], (_model, _context, options) => {
+      const sessionId = options?.sessionId ?? "";
+      keys.set(sessionId, [...(keys.get(sessionId) ?? []), options?.apiKey ?? ""]);
+      return options?.apiKey === "token-a"
+        ? eventStream([
+            start(),
+            { type: "error", reason: "error", error: message("error", "unauthorized") },
+          ])
+        : eventStream(successfulText());
+    });
+    const selections = new Map<string, number>();
+    setup.value.selectAndReserve = async ({ options }) => {
+      const sessionId = options?.sessionId ?? "";
+      selections.set(sessionId, (selections.get(sessionId) ?? 0) + 1);
+      return {
+        kind: "selected",
+        lease: {
+          accountId: "a",
+          leaseToken: `lease-${sessionId}`,
+          reservationTtlMs: 120_000,
+        },
+      };
+    };
+    setup.value.classifyFailure = (error) =>
+      error instanceof Object && "errorMessage" in error
+        ? { kind: "auth-retry" }
+        : classifyFailure(error, 2_000_000_000_000);
+    const routed = createRoutedStream(setup.value);
+
+    const results = await Promise.all([
+      collect(routed(model, context, { sessionId: "one" })),
+      collect(routed(model, context, { sessionId: "two" })),
+    ]);
+
+    expect(results.every((events) => events.at(-1)?.type === "done")).toBeTrue();
+    expect(Object.fromEntries(selections)).toEqual({ one: 1, two: 1 });
+    expect(keys.get("one")).toEqual(["token-a", "refreshed-a"]);
+    expect(keys.get("two")).toEqual(["token-a", "refreshed-a"]);
+    expect(setup.released.sort()).toEqual(["lease-one", "lease-two"]);
+    expect(setup.recorded).toEqual([]);
+  });
+
   test("records a recoverable failure on the final attempt", async () => {
     const setup = dependencies(["a"], () => eventStream([start(), quotaError()]));
     setup.value.maxAttempts = () => 1;
