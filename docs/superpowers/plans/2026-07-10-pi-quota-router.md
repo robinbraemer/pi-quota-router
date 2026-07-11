@@ -535,7 +535,7 @@ Prove:
 
 - exhausted active windows block until the earliest relevant reset;
 - missing reset uses a one-hour estimate capped at six hours;
-- fresh usage may shorten an estimated cooldown;
+- fresh usage may shorten an estimated quota cooldown without clearing authentication or transient blocks;
 - fresh usage does not erase a later live error observation;
 - all-blocked wait rechecks persisted state each minute;
 - wait returns when a peer clears state;
@@ -579,7 +579,7 @@ Write failing tests showing:
 
 **Step 2: Write routed failover tests**
 
-Use a fake StreamFunction. Cover pre-output quota rotation, one forced token refresh for a first 401, definitive auth rotation, maximum five attempts, no account repeated in one request, all-limited recovery wait, post-output error pass-through, exact event order, and signal propagation.
+Use a fake StreamFunction. Cover pre-output quota rotation, one forced token refresh for a first 401, definitive auth rotation, maximum five attempts, no account repeated before recovery, eligible accounts becoming retryable after cooldown, an all-limited recovery wait with one cumulative deadline, post-output error pass-through, exact event order, and signal propagation.
 
 **Step 3: Confirm the red state**
 
@@ -742,7 +742,7 @@ If the vault is empty, bootstrapKey is pending-login. The routed stream checks t
 
 - construct one RouterController in the async extension factory;
 - mark foreground active on agent_start;
-- mark idle and schedule an authorized sweep on agent_settled;
+- mark idle on agent_settled without scheduling background priming;
 - abort background work and release local leases on session_shutdown;
 - do no network work merely to render startup.
 
@@ -782,20 +782,18 @@ Test every documented subcommand, quoted labels, unknown command help, invalid a
 
 **Step 2: Write failing command integration tests**
 
-Prove that status, accounts, login, use, refresh, prime, policy, reset, verify, path, and log call structured controller methods. Mutating commands must print exact outcomes. Prime must show and persist both confirmations before scheduling synthetic spend.
+Prove that status, accounts, login, use, refresh, prime, policy, reset, verify, path, and log call structured controller methods. Mutating commands must print exact outcomes. Prime must obtain both ephemeral confirmations before scheduling synthetic spend without persisting that authorization.
 
-Login uses loginOpenAICodex from @earendil-works/pi-ai/oauth and maps Pi UI callbacks:
+Login uses `loginOpenAICodex` from `@earendil-works/pi-ai/oauth`, validates the fixed client, callback, state, and PKCE authorization URL, and maps Pi UI callbacks through the argument-safe authorization actions:
 
     const credentials = await loginOpenAICodex({
       originator: "pi-quota-router",
-      onAuth: ({ url, instructions }) => {
-        ctx.ui.notify(instructions ?? "Complete login in your browser", "info");
-        openUrl(url);
-      },
-      onPrompt: async ({ message }) => ctx.ui.input(message),
+      onAuth: ({ url }) => presentValidatedAuthorizationActions(ctx, url),
+      onPrompt: ({ message, placeholder }) => ctx.ui.input(message, placeholder),
+      onManualCodeInput: () => promptForAuthorizationCode(ctx),
     });
 
-Adapt the exact UI calls to the public HookCommandContext types at Pi 0.80.6. If Pi exposes a browser-opening helper, use it; otherwise display and copy the URL without a shell invocation.
+Adapt the exact UI calls to the public `ExtensionCommandContext` types at Pi 0.80.6. Browser and clipboard processes use fixed executable names, explicit arguments, and no shell; upstream OAuth failures are replaced with a credential-free message.
 
 **Step 3: Add status and footer**
 

@@ -13,7 +13,7 @@
 - Work only on `feat/implement-quota-router` and push only to existing PR #1.
 - Use TDD for every behavior change and observe each focused test fail for the intended reason.
 - Never invoke a shell to open the authorization URL.
-- Always display the raw authorization URL as the manual fallback.
+- Display the validated authorization URL for manual selection and every unavailable or failed action.
 - Preserve model/thinking identity, credential boundaries, and existing routing guarantees.
 - Squash-merge only after implementation review, no-mistakes, push CI, and PR CI are all green.
 
@@ -32,7 +32,7 @@
 
 - [ ] **Step 1: Write failing selector tests**
 
-Cover browser selection, copy selection, manual/cancel selection, and failures. Assert the URL is notified before selection and repeated in failure warnings.
+Cover browser selection, copy selection, manual/cancel selection, and failures. Assert manual and failure warnings include the validated URL.
 
 - [ ] **Step 2: Verify red**
 

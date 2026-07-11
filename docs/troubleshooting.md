@@ -18,11 +18,13 @@ Start with:
 | `invalid` | Close peer Pi processes, use `/quota-router path`, preserve a copy of the directory, and inspect JSON syntax/schema. Do not overwrite `accounts.json` unless you are prepared to reauthenticate. |
 | Footer ends in `login` | No account has completed login; run `/quota-router login`. |
 | Footer contains `?` | Run `/quota-router refresh all`; the weekly clock may genuinely be absent on an untouched account. |
-| Account says `reauth required` | Run `/quota-router login <same-label>` with that Codex identity. A successful duplicate login replaces the saved credentials and clears its authentication block. |
-| Browser or clipboard authorization action fails | Use the authorization URL printed above the selector. The URL is always preserved as a manual fallback. |
+| Account says `reauth required` | Run `/quota-router login <label>` and sign in with that Codex identity. A successful duplicate login replaces the saved credentials and label, then clears its authentication block. |
+| Browser or clipboard authorization action fails | Use the authorization URL shown in the warning as a manual fallback. |
+| `Unexpected Codex authorization URL` | Update normal Pi and retry. The router rejected an OAuth URL that did not match the fixed OpenAI client, callback, state, and PKCE contract, and saved no credentials. |
+| `Codex login failed. Please try again.` | Retry the login and check connectivity. Upstream OAuth details are intentionally hidden because they may contain credentials. |
 | Footer still shows `none · login` after successful login | Run `/quota-router list` to confirm the account, then `/quota-router status`. Current versions rerender immediately; update the Git package if the stale footer persists. |
 | `Ambiguous Codex account label` | Run `/quota-router list` and repeat `use`, `refresh`, or `prime` with the intended managed account id. Duplicate labels are never resolved arbitrarily. |
-| `no_eligible_accounts` | Refresh usage, inspect policy/headroom, prime confirmed untouched accounts, or wait for cooldowns. A fresh non-exhausted result clears an estimated block. A deliberate `/quota-router use <account>` can bypass automatic headroom. |
+| `no_eligible_accounts` | Refresh usage, inspect policy/headroom, prime confirmed untouched accounts, or wait for cooldowns. A fresh non-exhausted result clears an estimated quota block, but not an authentication or transient block. A deliberate `/quota-router use <account>` can bypass automatic headroom. |
 | `manual_account_unavailable` | Reauthenticate/clear the account's block, wait for its reservation, or run `/quota-router use auto`. |
 | `not_authorized` from prime | Invoke `/quota-router prime ...` interactively and accept both confirmations. Authorization applies only to that invocation. |
 | `not_candidate` from prime | The account is already confirmed, is not untouched, or is inside the one-hour primer retry cooldown. |
@@ -47,7 +49,7 @@ Start with:
 | `ReservationLostError` | An active request's persisted lease disappeared or could not be renewed. | Retry the turn after checking peer processes. Do not reset reservations while any Pi process is active. |
 | `CodexUsageParseError` | The usage endpoint returned an unsupported body. | Update Pi Quota Router; preserve a redacted response shape if filing an issue. Never post headers/tokens. |
 | `CodexUsageHttpError` | Usage returned HTTP failure, timed out, or did not complete. | Check connectivity/authentication, run `refresh all`, and retry. Last-good data can be used conservatively for up to 24 hours. |
-| `RecoveryWaitTimeoutError` | No account recovered during the six-hour bounded wait. | Refresh/login accounts or wait for the actual reset before retrying. |
+| `RecoveryWaitTimeoutError` | No account recovered during the routed request's cumulative configured wait (six hours by default). | Refresh/login accounts or wait for the actual reset before retrying. |
 | `NoRecoverableAccountError` | Every unavailable account is permanently invalid or has no automatic retry time. | Reauthenticate or manually repair policy/state; waiting cannot help. |
 | `CommandParseError` | Unknown command, too many args, invalid reset/log option, or unsafe selector. | Use the command table in the README and quote labels containing spaces. |
 

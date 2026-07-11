@@ -16,9 +16,9 @@ Normal Pi users can deliberately choose how to handle the Codex OAuth URL, see a
 2. `Copy authorization URL`
 3. `Show authorization URL for manual use`
 
-Opening uses `node:child_process.spawn` directly with platform arguments (`open`, `rundll32 url.dll,FileProtocolHandler`, or `xdg-open`) and never invokes a shell. Copying writes only the validated URL to a platform clipboard process over stdin. Selector, launcher, or clipboard failures produce a warning that includes the validated URL; they never abort OAuth or hide the manual path.
+Opening uses `node:child_process.spawn` directly with platform arguments (`open`, `rundll32 url.dll,FileProtocolHandler`, or `xdg-open`) and never invokes a shell. Copying writes only the validated URL to a platform clipboard process over stdin. Manual selection and selector, launcher, or clipboard failures produce a warning that includes the validated URL; those action failures never abort OAuth or hide the manual path.
 
-`performCodexLogin` starts the asynchronous handoff from OAuth's synchronous `onAuth` callback without awaiting the selector. This prevents an unattended selector from blocking OAuth completion; handoff failures are contained because the printed URL remains usable. The launcher and clipboard functions are dependency-injected for deterministic tests.
+`performCodexLogin` starts the asynchronous handoff from OAuth's synchronous `onAuth` callback. Manual-code fallback waits for that choice, while a successful browser callback aborts an outstanding selector or prompt. The action settles before vault persistence, so an unexpected authorization URL prevents credentials from being saved. The launcher and clipboard functions are dependency-injected for deterministic tests.
 
 ## Immediate status ownership
 
@@ -28,7 +28,7 @@ The `/quota-router login` dispatcher immediately calls `operations.status()` and
 
 ## Command discovery
 
-The parser accepts `list` and `help` in addition to the existing commands. `list` dispatches to the existing account-list operation. Bare `/quota-router` and `/quota-router help` return the compact status followed by a `QUICK COMMANDS` block.
+The parser accepts `list` and `help` in addition to the existing commands. `list` has a first-class operation, while `accounts` uses the same cached-quota formatter as a compatibility alias. Bare `/quota-router` and `/quota-router help` return the compact status followed by a `QUICK COMMANDS` block.
 
 The quick block uses prominent `◆` markers for the live-use commands:
 

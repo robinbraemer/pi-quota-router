@@ -39,9 +39,7 @@ Open normal Pi and add each Codex account with a distinct label:
 /quota-router status
 ```
 
-Each `login` starts Pi's normal OpenAI Codex OAuth flow, then asks whether to open the authorization URL in the default browser, copy it, or show it for manual use. Browser and clipboard failures leave the validated URL visible for manual use. After a successful login, the footer is refreshed before the command returns. The router keeps its own multi-account vault and does not rewrite Pi's `auth.json`.
-
-When the authorization URL is ready, Pi shows an explicit action selector: open it in the default browser, copy it to the clipboard, or continue manually. The full URL always remains visible, including when a browser, clipboard, or interactive selector is unavailable, and the selector does not block OAuth completion. After credentials are saved, the footer rerenders immediately with the account label; it does not wait for a later agent turn. This display update does not count as a successful route or affect automatic-routing hysteresis. Reauthenticating an existing identity also clears its persisted authentication block, and a later failure from the replaced credential cannot invalidate the new login.
+Each `login` starts Pi's normal OpenAI Codex OAuth flow, then asks whether to open the validated authorization URL in the default browser, copy it, or show it for manual use. Choosing the manual action, or encountering an unavailable selector, browser, or clipboard, displays that URL for manual use. A successful browser callback can complete OAuth without waiting for an outstanding selector or manual-code prompt. After credentials are saved, the footer rerenders immediately with the account label; this display update does not count as a successful route or affect automatic-routing hysteresis. Reauthenticating an existing identity also clears its persisted authentication block, and a later failure from the replaced credential cannot invalidate the new login. The router keeps its own multi-account vault and does not rewrite Pi's `auth.json`.
 
 After at least one account has a weekly reset timestamp, ordinary Codex prompts route automatically. The model id, capabilities, and selected thinking level are passed through unchanged.
 
@@ -99,7 +97,7 @@ The confirmations authorize only the current command. They do not change `config
 | `/quota-router login [label]` | Add or reauthenticate a Codex account through Pi OAuth. |
 | `/quota-router use <account-or-label>` | Force a specific account, including below automatic headroom floors. |
 | `/quota-router use auto` | Return to quota-aware automatic routing. |
-| `/quota-router refresh [account-or-all]` | Refresh OAuth if needed and force fresh quota usage, reconciling estimated cooldowns. |
+| `/quota-router refresh [account-or-all]` | Refresh OAuth if needed and force fresh quota usage, reconciling estimated quota cooldowns. |
 | `/quota-router prime [account-or-all]` | Ask for both confirmations, send at most one minimal primer request, refresh quota, then stop. |
 | `/quota-router policy` | Print the active JSON policy. |
 | `/quota-router reset cooldowns` | Clear persisted quota/auth/transient cooldowns. |
@@ -125,6 +123,8 @@ Codex · work · 5h 72% · 7d 41%/18h · urgent 0.023/h · auto
 - `auto`, `manual`, or `login`: routing mode.
 - `?`: usage or reset data is not yet known.
 
+After a restart, status restores a manual account or the most recently persisted selection when possible; cached usage supplies its quota fields without startup network work.
+
 ## Files and permissions
 
 By default, data lives in `~/.pi/agent/pi-quota-router/`. If `PI_CODING_AGENT_DIR` is set, it lives below that directory instead.
@@ -133,10 +133,12 @@ By default, data lives in `~/.pi/agent/pi-quota-router/`. If `PI_CODING_AGENT_DI
 | --- | --- | ---: |
 | `accounts.json` | Raw account id, OAuth access/refresh tokens, labels, expiry | `0600` |
 | `config.json` | Routing, headroom, hysteresis, and priming policy | `0600` |
-| `state.json` | Non-secret blocks, reservations, primer state, last selection | `0600` |
+| `state.json` | Non-secret cached usage, blocks, reservations, primer state, last selection | `0600` |
 | `events.ndjson` | Redacted bounded operational events | `0600` |
 
 The containing directory is `0700`. Same-directory temporary files, lock targets, and the single rotated `events.ndjson.1` predecessor are also private. Details and threat limits are in [Security](docs/security.md).
+
+Cached usage snapshots survive Pi restarts. The router reuses them while fresh, can fall back to them conservatively for up to 24 hours after a fetch failure, and refreshes them when their freshness or recorded reset time expires.
 
 ## Update and uninstall
 

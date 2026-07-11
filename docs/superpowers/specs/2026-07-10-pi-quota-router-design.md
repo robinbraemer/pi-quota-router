@@ -75,7 +75,7 @@ Borrow reliability mechanisms:
 - All-limited wake-up behavior and cancellation semantics.
 - Anti-ping-pong logic, stuck-work guards, and circuit-breaker thinking.
 - Account identity deduplication by stable Codex `accountId`.
-- Usage freshness reconciliation when an estimated cooldown is pessimistic.
+- Usage freshness reconciliation when an estimated quota cooldown is pessimistic.
 - Guarantee-driven regression tests.
 
 Do not inherit:
@@ -195,6 +195,7 @@ The provider override is the only component coupled to Pi's streaming types. Sel
 - Coalesces concurrent ordinary refreshes and queues one forced follow-up behind an in-flight request.
 - Keeps a last-good snapshot for 24 hours, clearly marked stale.
 - Refreshes a cached snapshot immediately when a recorded usage-window reset time has elapsed.
+- Hydrates and reconciles the newest persisted snapshot so cache and fallback behavior survive controller restarts.
 - Forces a fresh fetch after every non-aborted primer provider attempt and after quota errors.
 - Limits concurrent upstream usage requests to two.
 
@@ -232,7 +233,8 @@ The provider override is the only component coupled to Pi's streaming types. Sel
 - Marks replay unsafe only after text, thinking, or tool-call content starts.
 - On a pre-output quota/auth error, blocks the account, releases the lease, and retries another account up to five times.
 - On a classified post-output failure, records the account block and forwards the error unchanged without replaying.
-- If all accounts are temporarily blocked before output, waits abortably for the earliest recovery for at most six hours.
+- If all accounts are temporarily blocked before output, waits abortably for the earliest recovery up to the configured limit (six hours by default).
+- Reuses one absolute recovery deadline across every wait in the routed request and resumes when any recoverable account becomes available.
 
 ### `src/status/status-controller.ts`
 
@@ -355,6 +357,7 @@ An account is ineligible when:
 - It is in a live quota/auth/transient cooldown.
 - Another live request owns its reservation.
 - Its usage is unknown or older than 24 hours.
+- Its weekly reset timestamp is missing or has elapsed without fresh post-reset usage.
 - Its remaining 5-hour quota is below 10%.
 - Its remaining weekly quota is below 3%.
 - It is untouched without a weekly reset clock and has not been successfully primed.
@@ -431,9 +434,9 @@ Classify quota/rate-limit failures from:
 - HTTP-equivalent error metadata when exposed.
 - `429`, `quota`, `usage limit`, `rate limit`, `too many requests`, and Codex usage-limit codes.
 
-After a quota failure, force-refresh usage. An explicit provider retry time controls the block; otherwise use the latest reset among exhausted windows. If neither is available, use a one-hour cooldown. Every observed deadline is capped at six hours.
+After a quota failure, force-refresh usage. An explicit provider retry time controls the block; otherwise use the latest reset among exhausted windows. If neither is available, use a one-hour cooldown. Failure-derived cooldowns are capped at six hours; a block derived directly from fresh exhausted usage retains the provider's earliest future reset.
 
-An explicit forced refresh reconciles an estimated cooldown: available quota clears it, while the latest observed exhausted-window reset replaces the estimate.
+An explicit forced refresh reconciles an estimated quota cooldown: available quota clears it, while the latest observed exhausted-window reset replaces the estimate.
 Independently, a fresh snapshot showing a 100% exhausted window creates a quota block until its earliest future reset when no other live block governs the account. Auth and transient blocks are not cleared by usage reconciliation.
 
 ### Authentication classification
@@ -441,7 +444,7 @@ Independently, a fresh snapshot showing a 100% exhausted window creates a quota 
 - Refresh expired tokens before the request.
 - Coalesce concurrent refreshes.
 - Preserve newer credentials when a successful login races an older refresh, usage, or routed-auth failure; permanent invalidation applies only if the rejected access token is still current.
-- On the first generic `401`, force-refresh once and retry the same account before rotating.
+- On the first generic `401` from usage collection or a routed provider call, force-refresh once and retry the same account before rotating.
 - Definitive `invalid_grant`, revoked-token, malformed access-token, or identity-mismatch responses mark the account `needsReauth` when the rejected credential is still current.
 - A transient refresh network failure causes a one-minute cooldown, not permanent invalidation.
 - No credential value appears in logs, notifications, state, or thrown messages.
@@ -457,10 +460,10 @@ After model-visible output begins, the wrapper forwards the provider error and n
 Before any output, the wrapper waits for the earliest known recovery when:
 
 - At least one account is temporarily blocked rather than permanently invalid.
-- The wait is at most six hours.
+- The wait remains inside the configured limit, which defaults to six hours.
 - The caller's abort signal remains active.
 
-The wait re-checks persisted state and the managed account list at most once per minute, so a peer process login, refresh, usage correction, or reservation release can wake the request before the original retry deadline. Escape/user abort ends the wait immediately.
+The wait re-checks persisted state and the managed account list at most once per minute, so a peer process login, refresh, usage correction, or reservation release can wake the request as soon as any recoverable account is available. Every wait in one routed request shares one cumulative configured deadline. Escape/user abort ends the wait immediately.
 
 ## Concurrency model
 
@@ -568,7 +571,7 @@ Each atomic selection persists a credential-free `lastSelection` explanation in 
 - Duplicate `accountId` login updates rather than duplicates.
 - Successful reauthentication clears the account's permanent auth block.
 - Stale auth failures cannot invalidate credentials installed by a concurrent re-login.
-- Forced fresh non-exhausted usage clears an estimated cooldown.
+- Forced fresh non-exhausted usage clears an estimated quota cooldown without clearing authentication or transient blocks.
 - Recovery waiting notices an account added by a peer.
 
 ### Storage tests

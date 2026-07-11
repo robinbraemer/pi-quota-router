@@ -13,11 +13,12 @@ Automatic routing rejects an account when any of these conditions is true:
 - no usage snapshot is available;
 - the snapshot is more than 24 hours old;
 - the weekly window or its reset timestamp is unknown;
+- the weekly reset timestamp has elapsed and fresh post-reset usage has not yet been obtained;
 - the account is untouched and has not obtained a reset clock through confirmed priming;
 - 5-hour remaining quota is below 10%;
 - weekly remaining quota is below 3%.
 
-Usage younger than five minutes is fresh. Data from five minutes through 24 hours is stale fallback data. The router uses a fresh eligible tier whenever one exists. Only when no fresh account is eligible may stale data participate, with five percentage points subtracted from both remaining windows before the headroom checks.
+Usage younger than five minutes is fresh. Data from five minutes through 24 hours is stale fallback data. Snapshots are persisted for restart-safe cache and fallback behavior, but a recorded 5-hour or weekly reset immediately expires the cache even inside the normal freshness period. The router uses a fresh eligible tier whenever one exists. Only when no fresh account is eligible may stale data participate, with five percentage points subtracted from both remaining windows before the headroom checks.
 
 The headroom floors are conservative safety margins, not predicted task costs. Codex exposes quota percentages but no dependable mapping from an arbitrary future turn to percentage cost.
 
@@ -61,18 +62,20 @@ Primer work renews both its singleton sweep lease and account lease. Foreground 
 - When no other live block governs the account, fresh usage showing an exhausted window creates a quota block until the earliest future reset. A cached snapshot is refreshed as soon as either recorded reset time elapses.
 - A transport `start` event is replay-safe.
 - Any text, thinking, or tool-call start makes replay unsafe; later errors are forwarded without account rotation.
-- A request performs at most five account attempts.
+- A request performs at most five account attempts. An account that failed earlier may become eligible again after its cooldown expires during recovery.
 - An explicit provider retry time controls a quota block. Otherwise the latest observed reset across exhausted windows is used; without either, the estimate is one hour.
-- All-limited recovery waits are abortable, recheck state at most once per minute, and stop after six hours.
+- All-limited recovery waits are abortable, recheck state at most once per minute, and stop at the configured recovery limit (six hours by default).
 - `invalid_grant`, a usage credential rejected again after forced refresh, and revoked refresh tokens set `needsReauth` only while the rejected credential is still current. A concurrent successful re-login wins and remains healthy.
 - Generic network/timeout failures use a one-minute transient retry time.
-- A generic pre-output `401` forces one token refresh and retries the same account before rotation.
-- A forced usage refresh clears an estimated block when quota is available; otherwise the latest observed exhausted-window reset replaces the estimate.
+- A generic `401` from usage collection or a pre-output routed provider call forces one token refresh and retries the same account before rotation.
+- A forced usage refresh clears an estimated quota block when quota is available; otherwise the latest observed exhausted-window reset replaces the estimate. Usage reconciliation never clears authentication or transient blocks.
 - Reauthenticating the same Codex identity clears its persisted authentication block.
 
-Concurrent usage refreshes for one account are coalesced. Cancelling one caller stops that caller's wait without cancelling the shared fetch needed by other callers.
+Concurrent ordinary usage refreshes for one account are coalesced. A forced refresh requested during an in-flight fetch queues one follow-up fetch, which concurrent forced callers share. Cancelling one caller stops that caller's wait without cancelling either shared fetch needed by other callers.
 
-When all known accounts are temporarily unavailable, recovery also rechecks the managed account list at most once per minute. A newly logged-in account or a peer's persisted block/reservation change can therefore release the wait before the original retry deadline.
+OAuth token refresh is likewise single-flight per account within a process. Cancelling one caller stops only that caller's wait, while the shared refresh continues for other callers.
+
+When all known accounts are temporarily unavailable, recovery rechecks persisted blocks, reservations, and the managed account list at most once per minute. It resumes as soon as any recoverable account becomes available or a new account is logged in. Repeated recovery waits within one routed request share one cumulative configured deadline rather than restarting the limit.
 
 ## Priming policy
 

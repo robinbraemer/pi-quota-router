@@ -64,18 +64,17 @@
 ### Task 4: Implement list, dashboard help, and post-login status
 
 **Files:**
-- Create: `src/commands/dashboard.ts`
 - Modify: `src/commands/parser.ts`
 - Modify: `src/commands/commands.ts`
 - Modify: `src/router-controller.ts`
 
 **Interfaces:**
-- `formatDashboard(status: string): string` returns compact status plus highlighted command rows.
+- `formatQuotaRouterDashboard(status: string): string` returns compact status plus highlighted command rows.
 - `QuotaRouterOperations.list()` returns the existing managed-account view enriched from cached usage when available.
-- Login updates `currentAccountId/currentLabel` only after vault persistence succeeds.
+- Login updates `displayAccountId/currentLabel` only after vault persistence succeeds.
 
 - [x] Implement the parser and dispatcher additions.
-- [x] Format dashboard help using multiline Pi notification text with a visible `AVAILABLE COMMANDS` heading and `>`-prefixed command rows.
+- [x] Format dashboard help inline in the command module with `QUICK COMMANDS`/`MORE COMMANDS` headings and marker-prefixed rows.
 - [x] Reuse one account-list formatter for `accounts` and `list`, adding cached 5-hour/weekly remaining state or `quota unknown` without network work.
 - [x] Update the controller's current account only after successful login and have the command handler rerender the footer in the same awaited lifecycle.
 - [x] Run the focused parser, command, controller, and login tests until green.
