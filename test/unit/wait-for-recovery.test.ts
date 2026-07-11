@@ -77,6 +77,44 @@ describe("waitForRecovery", () => {
     expect(sleeps).toBe(1);
   });
 
+  test("wakes when any requested account becomes available", async () => {
+    let now = START;
+    const store = await setup(START + 3_600_000);
+    await store.update((state) => ({
+      ...state,
+      blocks: [
+        ...state.blocks,
+        {
+          accountId: "b",
+          kind: "quota",
+          blockedAt: START,
+          retryAt: START + 3_600_000,
+          estimated: true,
+        },
+      ],
+    }));
+    let sleeps = 0;
+
+    await waitForRecovery({
+      stateStore: store,
+      accountIds: ["a", "b"],
+      clock: () => now,
+      sleep: async (milliseconds) => {
+        sleeps += 1;
+        if (sleeps > 1) {
+          throw new Error("waited after an account recovered");
+        }
+        now += milliseconds;
+        await store.update((state) => ({
+          ...state,
+          blocks: state.blocks.filter((block) => block.accountId !== "a"),
+        }));
+      },
+    });
+
+    expect(sleeps).toBe(1);
+  });
+
   test("caps waiting at six hours", async () => {
     let now = START;
     const store = await setup(START + 36_000_000);

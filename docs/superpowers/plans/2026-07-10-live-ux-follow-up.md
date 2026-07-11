@@ -22,13 +22,13 @@
 ### Task 1: Authorization action selector
 
 **Files:**
-- Create: `src/commands/authorization-handoff.ts`
+- Create: `src/commands/authorization-actions.ts`
 - Modify: `src/commands/login.ts`
 - Test: `test/integration/login.test.ts`
 
 **Interfaces:**
-- Produces: `presentAuthorizationHandoff(options): Promise<void>` and `CodexLoginResult`.
-- Consumes: `ExtensionUIContext.select`, `ExtensionUIContext.notify`, and `copyToClipboard`.
+- Produces: `AuthorizationActions`, `validateAuthorizationUrl(value)`, and `CodexLoginResult`.
+- Consumes: `ExtensionCommandContext.ui.select`, `ExtensionCommandContext.ui.notify`, and argument-safe platform processes.
 
 - [ ] **Step 1: Write failing selector tests**
 
@@ -38,23 +38,22 @@ Cover browser selection, copy selection, manual/cancel selection, and failures. 
 
 Run: `bun test test/integration/login.test.ts`
 
-Expected: failures because the selector and action dependencies do not exist.
+Expected: failures because the selector and validated action dependencies do not exist.
 
 - [ ] **Step 3: Implement the minimal handoff**
 
-Create exported labels and:
+Create the validated action boundary:
 
 ```ts
-export async function presentAuthorizationHandoff(options: {
-  ui: Pick<ExtensionUIContext, "select" | "notify">;
-  url: string;
-  instructions?: string;
-  openUrl?: (url: string) => Promise<void>;
-  copyUrl?: (url: string) => Promise<void>;
-}): Promise<void>;
+export interface AuthorizationActions {
+  open(url: string): Promise<void>;
+  copy(url: string): Promise<void>;
+}
+
+export function validateAuthorizationUrl(value: string): string;
 ```
 
-Implement the platform launcher with argument-array `spawn`, and make `performCodexLogin` return:
+Implement the platform launchers with argument-array `spawn`, keep selector/manual fallback handling in `login.ts`, and make `performCodexLogin` return:
 
 ```ts
 export interface CodexLoginResult {

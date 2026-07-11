@@ -10,13 +10,13 @@ Normal Pi users can deliberately choose how to handle the Codex OAuth URL, see a
 
 ## Authorization handoff
 
-`src/commands/authorization-handoff.ts` owns the URL handoff. It always prints the authorization URL and any provider instructions first, preserving a manual fallback in every environment. It then calls `ctx.ui.select` with three explicit actions:
+`src/commands/authorization-actions.ts` validates the fixed OpenAI authorization endpoint and owns the argument-safe browser and clipboard launchers. `src/commands/login.ts` calls `ctx.ui.select` with three explicit actions:
 
 1. `Open authorization URL in default browser`
 2. `Copy authorization URL`
-3. `Continue manually (URL shown above)`
+3. `Show authorization URL for manual use`
 
-Opening uses `node:child_process.spawn` directly with platform arguments (`open`, `rundll32 url.dll,FileProtocolHandler`, or `xdg-open`) and never invokes a shell. Copying uses normal Pi's public `copyToClipboard` export. Selector, launcher, or clipboard failures produce a warning that repeats the URL; they never abort OAuth or hide the manual path.
+Opening uses `node:child_process.spawn` directly with platform arguments (`open`, `rundll32 url.dll,FileProtocolHandler`, or `xdg-open`) and never invokes a shell. Copying writes only the validated URL to a platform clipboard process over stdin. Selector, launcher, or clipboard failures produce a warning that includes the validated URL; they never abort OAuth or hide the manual path.
 
 `performCodexLogin` starts the asynchronous handoff from OAuth's synchronous `onAuth` callback without awaiting the selector. This prevents an unattended selector from blocking OAuth completion; handoff failures are contained because the printed URL remains usable. The launcher and clipboard functions are dependency-injected for deterministic tests.
 

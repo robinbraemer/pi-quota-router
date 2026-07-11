@@ -4,7 +4,7 @@
 
 **Goal:** Make Codex login handoff explicit and safe, refresh status immediately after login, add a discoverable `list` command with quota state, and turn the dashboard into command-oriented help.
 
-**Architecture:** Keep OAuth credential exchange and persistence unchanged. Add a small authorization-handoff boundary that validates the fixed OpenAI authorization endpoint before offering Pi's selector, then invokes browser/clipboard launchers with explicit argv and always retains a manual URL fallback. Keep command routing responsible for immediate footer rendering, while the router controller updates its cached active label/id after persistence and formats list/dashboard data from existing cached state.
+**Architecture:** Keep OAuth credential exchange and persistence unchanged. Add a small authorization-actions boundary that validates the fixed OpenAI authorization endpoint before offering Pi's selector, then invokes browser/clipboard launchers with explicit argv and always retains a manual URL fallback. Keep command routing responsible for immediate footer rendering, while the router controller updates its cached active label/id after persistence and formats list/dashboard data from existing cached state.
 
 **Tech Stack:** TypeScript, Bun test, normal Pi extension APIs, Node `child_process.spawn` without shell execution.
 
