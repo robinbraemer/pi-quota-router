@@ -6,6 +6,7 @@ import {
   type Context,
   createAssistantMessageEventStream,
   type Model,
+  type SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
 import { OPENAI_CODEX_MODELS } from "@earendil-works/pi-ai/providers/openai-codex.models";
 import { AccountNeedsReauthError } from "../../src/accounts/account-vault.ts";
@@ -19,6 +20,7 @@ import { createAtomicJsonStore } from "../../src/storage/atomic-json-store.ts";
 import { resolveRouterPaths } from "../../src/storage/paths.ts";
 import {
   defaultRuntimeState,
+  RouterConfigSchema,
   type RuntimeStateFile,
   RuntimeStateFileSchema,
 } from "../../src/storage/schemas.ts";
@@ -470,37 +472,256 @@ describe("quota router end-to-end guarantees", () => {
     ).rejects.toThrow("SIGINT");
   });
 
-  test("writes fixture credentials only to accounts.json", async () => {
+  test("keeps synthetic secrets and content out of every routed diagnostic surface", async () => {
     const home = await createIsolatedPiHome();
     cleanups.push(home.cleanup);
-    const credential = makeCredentials(
-      "raw-secret-account-id",
-      NOW + 3_600_000,
-      "fixture-secret-suffix",
-    );
+    const boundary = syntheticBoundaryFixture();
+    const paths = resolveRouterPaths(home.agentDirectory);
+    const configStore = createAtomicJsonStore({
+      path: paths.config,
+      schema: RouterConfigSchema,
+      createDefault: () => structuredClone(defaultConfig),
+    });
+    await configStore.update((config) => ({
+      ...config,
+      maxRotationAttempts: 2,
+      reservationTtlMs: 15,
+    }));
+    let mode:
+      | "success"
+      | "auth-retry"
+      | "auth-exhausted"
+      | "pre-quota"
+      | "post-quota"
+      | "thrown"
+      | "hold" = "success";
+    let modeCalls = 0;
+    let streamEntered: (() => void) | undefined;
+    const waitForAbort = (options?: SimpleStreamOptions) =>
+      (async function* () {
+        yield start();
+        streamEntered?.();
+        const signal = options?.signal;
+        if (!signal) throw new Error("missing heartbeat signal");
+        signal.throwIfAborted();
+        await new Promise<void>((_resolve, reject) => {
+          signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+        });
+      })();
     const controller = await createRouterController({
-      paths: resolveRouterPaths(home.agentDirectory),
+      paths,
       clock: () => NOW,
-      oauth: { refresh: async () => credential },
+      oauth: {
+        refresh: async (refreshToken) =>
+          boundary.credentials.find((credential) => credential.refresh === refreshToken) ??
+          boundary.credentials[0],
+      },
       fetchImpl: fakeCodexUsage(() =>
         usageResponse({ weeklyUsed: 30, weeklyResetAt: NOW + 48 * 3_600_000 }),
       ),
-      baseStream: () => eventStream(successfulText()),
+      baseStream: (_model, _context, options) => {
+        modeCalls += 1;
+        if (mode === "hold") {
+          return waitForAbort(options) as unknown as ReturnType<
+            RoutedStreamDependencies["baseStream"]
+          >;
+        }
+        if ((mode === "auth-retry" && modeCalls === 1) || mode === "auth-exhausted") {
+          return eventStream([
+            start(),
+            {
+              type: "error",
+              reason: "error",
+              error: message("error", `401 unauthorized ${boundary.providerPayload}`),
+            },
+          ]);
+        }
+        if (mode === "pre-quota" && options?.apiKey === boundary.credentials[0]?.access) {
+          return eventStream([
+            start(),
+            {
+              type: "error",
+              reason: "error",
+              error: message("error", `usage limit reached ${boundary.providerPayload}`),
+            },
+          ]);
+        }
+        if (mode === "post-quota") {
+          return eventStream([
+            start(),
+            { type: "text_start", contentIndex: 0, partial: message() },
+            {
+              type: "error",
+              reason: "error",
+              error: message(
+                "error",
+                `usage limit reached ${boundary.providerPayload} ${boundary.authorizationHeader}`,
+              ),
+            },
+          ]);
+        }
+        if (mode === "thrown") {
+          throw Object.assign(
+            new Error(`provider request failed ${boundary.providerPayload} ${boundary.cookie}`),
+            {
+              body: boundary.providerPayload,
+              headers: {
+                authorization: boundary.authorizationHeader,
+                cookie: boundary.cookie,
+              },
+            },
+          );
+        }
+        return eventStream(successfulText());
+      },
     });
-    await controller.vault.addFromOAuth("secret-check", credential);
-    await collect(controller.routedStream(model, context));
+    const managedIds = await Promise.all([
+      controller.vault.addFromOAuth("secret-check-a", boundary.credentials[0]),
+      controller.vault.addFromOAuth("secret-check-b", boundary.credentials[1]),
+    ]);
+    const captured: unknown[] = [await collect(controller.routedStream(model, boundary.context))];
+
+    mode = "auth-retry";
+    modeCalls = 0;
+    captured.push(await collect(controller.routedStream(model, boundary.context)));
+
+    mode = "auth-exhausted";
+    modeCalls = 0;
+    const exhaustedAuthEvents = await collect(controller.routedStream(model, boundary.context));
+    expect(terminalErrorMessage(exhaustedAuthEvents)).toBe(
+      "No Codex account completed the request",
+    );
+    captured.push(exhaustedAuthEvents);
+    captured.push(await controller.operations.reset("cooldowns"));
+
+    mode = "pre-quota";
+    modeCalls = 0;
+    const preQuotaEvents = await collect(controller.routedStream(model, boundary.context));
+    expect(preQuotaEvents.at(-1)?.type).toBe("done");
+    captured.push(preQuotaEvents);
+    captured.push(await controller.operations.reset("cooldowns"));
+
+    mode = "post-quota";
+    modeCalls = 0;
+    const postQuotaEvents = await collect(controller.routedStream(model, boundary.context));
+    expect(terminalErrorMessage(postQuotaEvents)).toBe("No Codex account completed the request");
+    captured.push(postQuotaEvents);
+    captured.push(await controller.operations.reset("cooldowns"));
+
+    mode = "thrown";
+    modeCalls = 0;
+    const thrownEvents = await collect(controller.routedStream(model, boundary.context));
+    expect(terminalErrorMessage(thrownEvents)).toBe("No Codex account completed the request");
+    captured.push(thrownEvents);
+
+    mode = "hold";
+    const cancelled = new AbortController();
+    const cancelEntered = new Promise<void>((resolve) => {
+      streamEntered = resolve;
+    });
+    const cancelledResult = collect(
+      controller.routedStream(model, boundary.context, { signal: cancelled.signal }),
+    );
+    await cancelEntered;
+    cancelled.abort(new Error(`cancelled ${boundary.cookie}`));
+    const cancelledEvents = await cancelledResult;
+    expect(terminalErrorMessage(cancelledEvents)).toBe("The Codex request was cancelled");
+    captured.push(cancelledEvents);
+
+    captured.push(await controller.operations.use(managedIds[0] ?? "missing"));
+    const stateStore = createAtomicJsonStore<RuntimeStateFile>({
+      path: paths.state,
+      schema: RuntimeStateFileSchema,
+      createDefault: () => structuredClone(defaultRuntimeState),
+    });
+    await stateStore.update((state) => ({
+      ...state,
+      reservations: [
+        ...state.reservations,
+        {
+          accountId: managedIds[0] ?? "missing",
+          leaseToken: "synthetic-primer-boundary",
+          owner: { processId: 7, sessionId: "primer-session", requestId: "primer-request" },
+          createdAt: NOW,
+          expiresAt: NOW + 60_000,
+          kind: "primer",
+        },
+      ],
+    }));
+    const primerAbort = new AbortController();
+    const primerResult = collect(
+      controller.routedStream(model, boundary.context, { signal: primerAbort.signal }),
+    );
+    setTimeout(
+      () => primerAbort.abort(new Error(`primer cancelled ${boundary.providerPayload}`)),
+      5,
+    );
+    const primerEvents = await primerResult;
+    expect(terminalErrorMessage(primerEvents)).toBe("The Codex request was cancelled");
+    captured.push(primerEvents);
+    captured.push(await controller.operations.reset("reservations"));
+    captured.push(await controller.operations.use("auto"));
+
+    mode = "hold";
+    const renewalEntered = new Promise<void>((resolve) => {
+      streamEntered = resolve;
+    });
+    const renewalResult = collect(controller.routedStream(model, boundary.context));
+    await renewalEntered;
+    await stateStore.update((state) => ({
+      ...state,
+      reservations: state.reservations.filter((reservation) => reservation.kind !== "foreground"),
+    }));
+    const renewalEvents = await renewalResult;
+    expect(terminalErrorMessage(renewalEvents)).toBe(
+      "The Codex account reservation could not be renewed",
+    );
+    captured.push(renewalEvents);
+
+    await stateStore.update((state) => ({
+      ...state,
+      reservations: [
+        {
+          accountId: "local-managed-account",
+          leaseToken: "local-boundary-lease",
+          owner: {
+            processId: process.pid,
+            sessionId: boundary.ownerSession,
+            requestId: boundary.ownerRequest,
+          },
+          createdAt: NOW,
+          expiresAt: NOW + 60_000,
+          kind: "foreground",
+        },
+      ],
+    }));
+    captured.push(
+      await controller.operations.status(),
+      await controller.operations.accounts(),
+      await controller.operations.policy(),
+      await controller.operations.verify(),
+    );
     await controller.shutdown();
 
-    const paths = resolveRouterPaths(home.agentDirectory);
-    expect(await readFile(paths.accounts, "utf8")).toContain(credential.refresh);
+    const accountsText = await readFile(paths.accounts, "utf8");
+    expect(boundary.credentialMarkers.every((marker) => accountsText.includes(marker))).toBeTrue();
+    expect(boundary.transientMarkers.every((marker) => !accountsText.includes(marker))).toBeTrue();
+    const stateText = await readFile(paths.state, "utf8");
+    expect(stateText.includes(boundary.ownerSession)).toBeTrue();
+    expect(stateText.includes(boundary.ownerRequest)).toBeTrue();
+    const capturedText = JSON.stringify(captured);
+    expect(boundary.allMarkers.every((marker) => !capturedText.includes(marker))).toBeTrue();
+    expect(capturedText.includes(boundary.ownerSession)).toBeFalse();
+    expect(capturedText.includes(boundary.ownerRequest)).toBeFalse();
     for (const relative of await readdir(paths.directory, { recursive: true })) {
       const path = join(paths.directory, relative);
       if (path === paths.accounts || !relative.includes(".")) continue;
       const content = await readFile(path, "utf8").catch(() => "");
-      expect(content).not.toContain(credential.access);
-      expect(content).not.toContain(credential.refresh);
-      expect(content).not.toContain("raw-secret-account-id");
-      expect(content).not.toContain("fixture-secret-suffix");
+      expect(boundary.allMarkers.every((marker) => !content.includes(marker))).toBeTrue();
+      if (path !== paths.state) {
+        expect(content.includes(boundary.ownerSession)).toBeFalse();
+        expect(content.includes(boundary.ownerRequest)).toBeFalse();
+      }
     }
   });
 });
@@ -541,6 +762,12 @@ async function collect(stream: AsyncIterable<AssistantMessageEvent>) {
   const events: AssistantMessageEvent[] = [];
   for await (const event of stream) events.push(event);
   return events;
+}
+
+function terminalErrorMessage(events: AssistantMessageEvent[]): string | undefined {
+  const terminal = events.at(-1);
+  expect(terminal?.type).toBe("error");
+  return terminal?.type === "error" ? terminal.error.errorMessage : undefined;
 }
 
 function routedDependencies(baseStream: RoutedStreamDependencies["baseStream"]): {
@@ -592,5 +819,56 @@ function routedDependencies(baseStream: RoutedStreamDependencies["baseStream"]):
       waitForRecovery: async () => undefined,
       maxAttempts: () => defaultConfig.maxRotationAttempts,
     },
+  };
+}
+
+function syntheticBoundaryFixture() {
+  const marker = (kind: string) => `synthetic-${kind}-${"z".repeat(36)}`;
+  const rawIdentities = [marker("provider-identity-a"), marker("provider-identity-b")] as const;
+  const accessCredentials = [
+    makeCredentials(rawIdentities[0], NOW + 3_600_000, marker("access-a")),
+    makeCredentials(rawIdentities[1], NOW + 3_600_000, marker("access-b")),
+  ] as const;
+  const refreshToken = `refresh_${marker("refresh")}`;
+  const jwt = [marker("jwt-header"), marker("jwt-payload"), marker("jwt-signature")].join(".");
+  const authorizationHeader = `Bearer ${marker("authorization")}`;
+  const prompt = marker("prompt");
+  const providerPayload = marker("payload-body");
+  const cookie = `session=${marker("cookie")}`;
+  const credentialMarkers = [
+    ...accessCredentials.map((credential) => credential.access),
+    refreshToken,
+    jwt,
+    ...rawIdentities,
+  ];
+  const transientMarkers = [authorizationHeader, prompt, providerPayload, cookie];
+  return {
+    credentials: [
+      {
+        ...accessCredentials[0],
+        refresh: [refreshToken, jwt, rawIdentities[0]].join("|"),
+      },
+      {
+        ...accessCredentials[1],
+        refresh: [refreshToken, jwt, rawIdentities[1]].join("|"),
+      },
+    ] as const,
+    context: {
+      messages: [
+        {
+          role: "user",
+          content: `${prompt}\n${authorizationHeader}\n${cookie}`,
+          timestamp: NOW,
+        },
+      ],
+    } as unknown as Context,
+    credentialMarkers,
+    transientMarkers,
+    allMarkers: [...credentialMarkers, ...transientMarkers],
+    authorizationHeader,
+    providerPayload,
+    cookie,
+    ownerSession: marker("owner-session"),
+    ownerRequest: marker("owner-request"),
   };
 }
