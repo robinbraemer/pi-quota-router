@@ -346,6 +346,35 @@ describe("PrimingController", () => {
     }
   });
 
+  test("keeps a crashed foreground fence until expiry without consulting its pid", async () => {
+    let now = NOW;
+    const { controller, store, requests, usageReads } = await setup({
+      authorized: true,
+      clock: () => now,
+    });
+    await store.update((state) => ({
+      ...state,
+      reservations: [
+        {
+          accountId: "a",
+          leaseToken: "crashed-foreground",
+          owner: { processId: 999_999, sessionId: "crashed", requestId: "crashed" },
+          createdAt: NOW,
+          expiresAt: NOW + 100,
+          kind: "foreground",
+        },
+      ],
+    }));
+
+    expect(await controller.primeAccount("a")).toEqual({ status: "reserved" });
+    expect(usageReads()).toBe(0);
+    expect(requests).toHaveLength(0);
+    now = NOW + 101;
+    expect(await controller.primeAccount("a")).toEqual({ status: "inconclusive" });
+    expect(requests).toHaveLength(1);
+    expect((await store.read()).reservations).toEqual([]);
+  });
+
   test("applies the sweep limit to primer attempts instead of account positions", async () => {
     const { controller, store, requests } = await setup({
       authorized: true,
