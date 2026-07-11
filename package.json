@@ -27,7 +27,7 @@
     "pack:check": "bun pm pack --dry-run --ignore-scripts"
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-ai": ">=0.80.0",
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-tui": "*"
   },
