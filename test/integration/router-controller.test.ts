@@ -6,6 +6,7 @@ import type {
   Model,
   SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
+import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { OPENAI_CODEX_MODELS } from "@earendil-works/pi-ai/providers/openai-codex.models";
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { deriveManagedAccountId } from "../../src/accounts/account-identity.ts";
@@ -448,6 +449,65 @@ describe("RouterController", () => {
     ]);
     await controller.shutdown();
   });
+
+  test("releases overlapping same-account streams independently", async () => {
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    const paths = resolveRouterPaths(fixture.directory);
+    const credential = makeCredentials("overlap-account", 3_000_000_000_000, "overlap");
+    const streams = new Map<string, ReturnType<typeof createAssistantMessageEventStream>>();
+    let markBothStarted: (() => void) | undefined;
+    const bothStarted = new Promise<void>((resolve) => {
+      markBothStarted = resolve;
+    });
+    const controller = await createRouterController({
+      paths,
+      clock: () => 2_000_000_000_000,
+      oauth: { refresh: async () => credential },
+      fetchImpl: async () => Response.json(completeUsageResponse),
+      baseStream: (_model, _context, options) => {
+        const stream = createAssistantMessageEventStream();
+        streams.set(options?.sessionId ?? "", stream);
+        if (streams.size === 2) markBothStarted?.();
+        return stream;
+      },
+    });
+    await controller.vault.addFromOAuth("overlap", credential);
+    const first = collectController(controller, { sessionId: "s1" });
+    const second = collectController(controller, { sessionId: "s2" });
+    const completed = new Set<string>();
+    try {
+      await bothStarted;
+      const firstStream = streams.get("s1");
+      const secondStream = streams.get("s2");
+      if (!firstStream || !secondStream) throw new Error("expected held streams for both sessions");
+      const stateStore = createAtomicJsonStore<RuntimeStateFile>({
+        path: paths.state,
+        schema: RuntimeStateFileSchema,
+        createDefault: () => structuredClone(defaultRuntimeState),
+      });
+      const during = await stateStore.read();
+      expect(during.reservations).toHaveLength(2);
+      expect(new Set(during.reservations.map((value) => value.leaseToken)).size).toBe(2);
+
+      for (const event of successfulText()) firstStream.push(event);
+      completed.add("s1");
+      await first;
+      expect((await stateStore.read()).reservations).toHaveLength(1);
+      for (const event of successfulText()) secondStream.push(event);
+      completed.add("s2");
+      await second;
+      expect((await stateStore.read()).reservations).toEqual([]);
+    } finally {
+      for (const [sessionId, stream] of streams) {
+        if (!completed.has(sessionId)) {
+          for (const event of successfulText()) stream.push(event);
+        }
+      }
+      await Promise.allSettled([first, second]);
+      await controller.shutdown();
+    }
+  }, 2_000);
 
   test("clears successful session affinity on shutdown", async () => {
     const fixture = await createStorageFixture();

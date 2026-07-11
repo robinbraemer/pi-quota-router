@@ -75,27 +75,24 @@ describe("quota router end-to-end guarantees", () => {
     await controller.shutdown();
   });
 
-  test("two concurrent controllers reserve different accounts", async () => {
+  test("two concurrent controllers share one account with distinct leases", async () => {
     const home = await createIsolatedPiHome();
     cleanups.push(home.cleanup);
     const paths = resolveRouterPaths(home.agentDirectory);
-    const credentials = [
-      makeCredentials("concurrent-a", NOW + 3_600_000),
-      makeCredentials("concurrent-b", NOW + 3_600_000),
-    ];
+    const credential = makeCredentials("concurrent-a", NOW + 3_600_000);
     const refreshCredential = makeCredentials("concurrent-refresh", NOW + 3_600_000);
     const streams: ReturnType<typeof createAssistantMessageEventStream>[] = [];
     const keys: string[] = [];
+    let markBothStarted: (() => void) | undefined;
+    const bothStarted = new Promise<void>((resolve) => {
+      markBothStarted = resolve;
+    });
     const delayedStream: RoutedStreamDependencies["baseStream"] = (_model, _context, options) => {
       keys.push(options?.apiKey ?? "");
       const stream = createAssistantMessageEventStream();
       streams.push(stream);
       if (streams.length === 2) {
-        queueMicrotask(() => {
-          for (const pending of streams) {
-            for (const event of successfulText()) pending.push(event);
-          }
-        });
+        markBothStarted?.();
       }
       return stream;
     };
@@ -110,19 +107,40 @@ describe("quota router end-to-end guarantees", () => {
     };
     const first = await createRouterController(options);
     const second = await createRouterController(options);
-    for (const [index, credential] of credentials.entries()) {
-      await first.vault.addFromOAuth(`account-${index + 1}`, credential);
+    await first.vault.addFromOAuth("account", credential);
+
+    const firstResult = collect(first.routedStream(model, context, { sessionId: "first" }));
+    const secondResult = collect(second.routedStream(model, context, { sessionId: "second" }));
+    let completed = false;
+    try {
+      await bothStarted;
+      const stateStore = createAtomicJsonStore<RuntimeStateFile>({
+        path: paths.state,
+        schema: RuntimeStateFileSchema,
+        createDefault: () => structuredClone(defaultRuntimeState),
+      });
+      const during = await stateStore.read();
+      expect(during.reservations).toHaveLength(2);
+      expect(new Set(during.reservations.map((value) => value.leaseToken)).size).toBe(2);
+      for (const stream of streams) {
+        for (const event of successfulText()) stream.push(event);
+      }
+      completed = true;
+      const results = await Promise.all([firstResult, secondResult]);
+
+      expect(results.every((events) => events.at(-1)?.type === "done")).toBeTrue();
+      expect(keys).toEqual([credential.access, credential.access]);
+      expect((await stateStore.read()).reservations).toEqual([]);
+    } finally {
+      if (!completed) {
+        for (const stream of streams) {
+          for (const event of successfulText()) stream.push(event);
+        }
+      }
+      await Promise.allSettled([firstResult, secondResult]);
+      await Promise.all([first.shutdown(), second.shutdown()]);
     }
-
-    const results = await Promise.all([
-      collect(first.routedStream(model, context, { sessionId: "first" })),
-      collect(second.routedStream(model, context, { sessionId: "second" })),
-    ]);
-
-    expect(results.every((events) => events.at(-1)?.type === "done")).toBeTrue();
-    expect(new Set(keys)).toEqual(new Set(credentials.map((value) => value.access)));
-    await Promise.all([first.shutdown(), second.shutdown()]);
-  });
+  }, 2_000);
 
   test("drains the useful quota whose weekly reset is most urgent", async () => {
     const home = await createIsolatedPiHome();
