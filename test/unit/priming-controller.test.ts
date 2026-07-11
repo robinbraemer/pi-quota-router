@@ -4,6 +4,7 @@ import {
   createPrimingController,
   type PrimerRequest,
 } from "../../src/priming/priming-controller.ts";
+import { startReservationHeartbeat } from "../../src/routing/reservation-heartbeat.ts";
 import {
   createReservationStore,
   type ReservationStore,
@@ -295,6 +296,54 @@ describe("PrimingController", () => {
     expect(usageReads()).toBe(0);
     expect(requests).toHaveLength(0);
     expect((await store.read()).reservations).toHaveLength(1);
+  });
+
+  test("keeps primer fenced by a peer after another foreground heartbeat is lost", async () => {
+    const { controller, store, requests, usageReads } = await setup({ authorized: true });
+    const reservations = createReservationStore(store);
+    await store.update((state) => ({
+      ...state,
+      reservations: [
+        {
+          accountId: "a",
+          leaseToken: "lost-heartbeat-token",
+          owner: { processId: 2, sessionId: "lost", requestId: "lost" },
+          createdAt: NOW,
+          expiresAt: NOW + 60_000,
+          kind: "foreground",
+        },
+        {
+          accountId: "a",
+          leaseToken: "live-peer-token",
+          owner: { processId: 3, sessionId: "peer", requestId: "peer" },
+          createdAt: NOW,
+          expiresAt: NOW + 60_000,
+          kind: "foreground",
+        },
+      ],
+    }));
+    const heartbeat = startReservationHeartbeat({
+      leaseToken: "lost-heartbeat-token",
+      ttlMs: 3,
+      renew: async () => false,
+    });
+    try {
+      if (!heartbeat.signal.aborted) {
+        await new Promise<void>((resolve) => {
+          heartbeat.signal.addEventListener("abort", () => resolve(), { once: true });
+        });
+      }
+      await reservations.release("lost-heartbeat-token");
+
+      expect((await store.read()).reservations.map((value) => value.leaseToken)).toEqual([
+        "live-peer-token",
+      ]);
+      expect(await controller.primeAccount("a")).toEqual({ status: "reserved" });
+      expect(usageReads()).toBe(0);
+      expect(requests).toHaveLength(0);
+    } finally {
+      await heartbeat.stop();
+    }
   });
 
   test("applies the sweep limit to primer attempts instead of account positions", async () => {

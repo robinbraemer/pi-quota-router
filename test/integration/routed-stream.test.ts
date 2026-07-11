@@ -291,6 +291,71 @@ describe("RoutedStream", () => {
     expect(setup.renewed.length).toBeGreaterThan(0);
   });
 
+  test("isolates renewal loss to the affected lease token", async () => {
+    let finishPeer: (() => void) | undefined;
+    const peerHeld = new Promise<void>((resolve) => {
+      finishPeer = resolve;
+    });
+    const baseStream = ((
+      _model: Model<"openai-codex-responses">,
+      _context: Context,
+      options?: SimpleStreamOptions,
+    ) =>
+      (async function* () {
+        yield start();
+        if (options?.sessionId === "peer") {
+          await peerHeld;
+        } else {
+          const signal = options?.signal;
+          if (!signal) throw new Error("renewal-loss fixture requires a heartbeat signal");
+          signal.throwIfAborted();
+          await new Promise<void>((_resolve, reject) => {
+            signal.addEventListener("abort", () => reject(signal.reason), {
+              once: true,
+            });
+          });
+        }
+        for (const event of successfulText().slice(1)) yield event;
+      })()) as unknown as RoutedStreamDependencies["baseStream"];
+    const setup = dependencies(["a"], baseStream);
+    setup.value.selectAndReserve = async ({ options }) => ({
+      kind: "selected",
+      lease: {
+        accountId: "a",
+        leaseToken: options?.sessionId === "lost" ? "lost-token" : "peer-token",
+        reservationTtlMs: 15,
+      },
+    });
+    setup.value.renew = async (leaseToken) => leaseToken !== "lost-token";
+    const routed = createRoutedStream(setup.value);
+
+    const lostPromise = collect(routed(model, context, { sessionId: "lost" }));
+    const peerPromise = collect(routed(model, context, { sessionId: "peer" }));
+    try {
+      const lost = await lostPromise;
+
+      const lostLast = lost.at(-1);
+      expect(lostLast?.type).toBe("error");
+      if (lostLast?.type !== "error") throw new Error("expected renewal loss error event");
+      expect(lost.filter((event) => event.type === "error")).toHaveLength(1);
+      expect(lostLast.error.errorMessage).toBe(
+        "The Codex account reservation could not be renewed",
+      );
+      expect(setup.released).toEqual(["lost-token"]);
+      expect(setup.recorded).toEqual([]);
+      expect(setup.succeeded).toEqual([]);
+
+      finishPeer?.();
+      const peer = await peerPromise;
+      expect(peer.at(-1)?.type).toBe("done");
+      expect(setup.released.sort()).toEqual(["lost-token", "peer-token"]);
+      expect(setup.succeeded).toEqual([["a", "peer"]]);
+    } finally {
+      finishPeer?.();
+      await Promise.allSettled([lostPromise, peerPromise]);
+    }
+  });
+
   test("enforces the maximum rotation attempt count", async () => {
     const setup = dependencies(["a", "b", "c", "d", "e", "f"], () =>
       eventStream([start(), quotaError()]),

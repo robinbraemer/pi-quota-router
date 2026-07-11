@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmod } from "node:fs/promises";
+import { chmod, readFile } from "node:fs/promises";
 import type {
   AssistantMessageEvent,
   Context,
@@ -509,6 +509,108 @@ describe("RouterController", () => {
     }
   }, 2_000);
 
+  test("cancels only one token while a same-account peer continues", async () => {
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    const paths = resolveRouterPaths(fixture.directory);
+    const credential = makeCredentials("cancel-overlap", 3_000_000_000_000, "cancel-overlap");
+    const attempts = new Map<string, number>();
+    let markBothStarted: (() => void) | undefined;
+    const bothStarted = new Promise<void>((resolve) => {
+      markBothStarted = resolve;
+    });
+    let finishPeer: (() => void) | undefined;
+    const peerHeld = new Promise<void>((resolve) => {
+      finishPeer = resolve;
+    });
+    const controller = await createRouterController({
+      paths,
+      clock: () => 2_000_000_000_000,
+      oauth: { refresh: async () => credential },
+      fetchImpl: async () => Response.json(completeUsageResponse),
+      baseStream: ((
+        _model: Model<"openai-codex-responses">,
+        _context: Context,
+        options?: SimpleStreamOptions,
+      ) => {
+        const sessionId = options?.sessionId ?? "";
+        return (async function* () {
+          const attempt = (attempts.get(sessionId) ?? 0) + 1;
+          attempts.set(sessionId, attempt);
+          if (attempts.size === 2) markBothStarted?.();
+          yield { type: "start", partial: message() } as AssistantMessageEvent;
+          if (sessionId === "cancelled" && attempt === 1) {
+            const signal = options?.signal;
+            if (!signal) throw new Error("cancelled fixture requires an abort signal");
+            signal.throwIfAborted();
+            await new Promise<void>((_resolve, reject) => {
+              signal.addEventListener("abort", () => reject(signal.reason), {
+                once: true,
+              });
+            });
+          } else {
+            await peerHeld;
+            for (const event of successfulText().slice(1)) yield event;
+          }
+        })();
+      }) as unknown as RouterControllerOptions["baseStream"],
+    });
+    await controller.vault.addFromOAuth("overlap", credential);
+    const abort = new AbortController();
+    const cancelled = collectController(controller, {
+      sessionId: "cancelled",
+      signal: abort.signal,
+    });
+    const peer = collectController(controller, { sessionId: "peer" });
+    try {
+      await bothStarted;
+      const stateStore = createAtomicJsonStore<RuntimeStateFile>({
+        path: paths.state,
+        schema: RuntimeStateFileSchema,
+        createDefault: () => structuredClone(defaultRuntimeState),
+      });
+      const before = await stateStore.read();
+      expect(before.reservations).toHaveLength(2);
+      const cancelledLease = before.reservations.find(
+        (reservation) => reservation.owner.sessionId === "cancelled",
+      );
+      const peerLease = before.reservations.find(
+        (reservation) => reservation.owner.sessionId === "peer",
+      );
+      if (!cancelledLease || !peerLease) throw new Error("expected both owned leases");
+      abort.abort(new Error("synthetic caller cancellation"));
+      expect((await cancelled).at(-1)?.type).toBe("error");
+      const afterCancel = await stateStore.read();
+      expect(afterCancel.reservations.map((reservation) => reservation.leaseToken)).toEqual([
+        peerLease.leaseToken,
+      ]);
+      expect(afterCancel.reservations[0]?.leaseToken).not.toBe(cancelledLease.leaseToken);
+      expect(afterCancel.blocks).toEqual([]);
+      expect(Object.fromEntries(attempts)).toEqual({ cancelled: 1, peer: 1 });
+      finishPeer?.();
+      expect((await peer).at(-1)?.type).toBe("done");
+      expect((await stateStore.read()).reservations).toEqual([]);
+
+      expect((await collectController(controller, { sessionId: "cancelled" })).at(-1)?.type).toBe(
+        "done",
+      );
+      expect(Object.fromEntries(attempts)).toEqual({ cancelled: 2, peer: 1 });
+      const selectedEvents = (await readFile(paths.log, "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as { type: string; detail?: { reason?: string } })
+        .filter((event) => event.type === "account_selected");
+      const finalSelection = selectedEvents.at(-1);
+      if (!finalSelection) throw new Error("expected a follow-up account_selected event");
+      expect(finalSelection.detail?.reason).toBe("highest_weekly_urgency");
+    } finally {
+      abort.abort();
+      finishPeer?.();
+      await Promise.allSettled([cancelled, peer]);
+      await controller.shutdown();
+    }
+  }, 2_000);
+
   test("clears successful session affinity on shutdown", async () => {
     const fixture = await createStorageFixture();
     cleanups.push(fixture.cleanup);
@@ -850,9 +952,10 @@ describe("RouterController", () => {
   test("propagates caller aborts during usage collection", async () => {
     const fixture = await createStorageFixture();
     cleanups.push(fixture.cleanup);
+    const paths = resolveRouterPaths(fixture.directory);
     const cancellation = new AbortController();
     const controller = await createRouterController({
-      paths: resolveRouterPaths(fixture.directory),
+      paths,
       clock: () => 2_000_000_000_000,
       oauth: { refresh: async () => makeCredentials("account-1", 3_000_000_000_000) },
       fetchImpl: async (_input, init) =>
@@ -873,6 +976,12 @@ describe("RouterController", () => {
     if (events[0]?.type === "error") {
       expect(events[0].error.errorMessage).toBe("SIGINT");
     }
+    const stateStore = createAtomicJsonStore<RuntimeStateFile>({
+      path: paths.state,
+      schema: RuntimeStateFileSchema,
+      createDefault: () => structuredClone(defaultRuntimeState),
+    });
+    expect((await stateStore.read()).reservations).toEqual([]);
     await controller.shutdown();
   });
 
