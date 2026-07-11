@@ -312,7 +312,10 @@ export async function createRouterController(
             type: "account_selected",
             at: clock(),
             accountId: displayAccountId,
-            detail: { reason: selected.decision.reason },
+            detail: {
+              reason: selected.decision.reason,
+              foregroundActiveBefore: selected.foregroundActiveBefore ?? 0,
+            },
           });
         }
         return {
