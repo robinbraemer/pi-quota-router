@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmod, readFile } from "node:fs/promises";
+import { chmod, readFile, stat, utimes } from "node:fs/promises";
 import type {
   AssistantMessageEvent,
   Context,
@@ -1991,6 +1991,46 @@ describe("RouterController", () => {
     expect(usageCalls).toBe(2);
     expect((await stateStore.read()).usageSnapshots[0]?.observedAt).toBe(2_000_000_000_001);
     await second.shutdown();
+  });
+
+  test("does not rewrite valid version-one state during startup", async () => {
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    const paths = resolveRouterPaths(fixture.directory);
+    const stateStore = createAtomicJsonStore<RuntimeStateFile>({
+      path: paths.state,
+      schema: RuntimeStateFileSchema,
+      createDefault: () => structuredClone(defaultRuntimeState),
+    });
+    await stateStore.update((state) => ({
+      ...state,
+      reservations: ["one", "two"].map((leaseToken, index) => ({
+        accountId: "a",
+        leaseToken,
+        owner: { processId: index + 1, sessionId: `s${index}`, requestId: `r${index}` },
+        createdAt: 2_000_000_000_000,
+        expiresAt: 2_000_000_060_000,
+        kind: "foreground" as const,
+      })),
+    }));
+    const knownOldTime = new Date(1_900_000_000_000);
+    await utimes(paths.state, knownOldTime, knownOldTime);
+    const beforeText = await readFile(paths.state, "utf8");
+    const beforeStat = await stat(paths.state);
+
+    const controller = await createRouterController({
+      paths,
+      clock: () => 2_000_000_000_000,
+      oauth: { refresh: async () => makeCredentials("unused", 3_000_000_000_000) },
+      fetchImpl: async () => Response.json(completeUsageResponse),
+      baseStream: () => eventStream(successfulText()),
+    });
+
+    expect(await readFile(paths.state, "utf8")).toBe(beforeText);
+    const afterStat = await stat(paths.state);
+    expect(afterStat.mtimeMs).toBe(beforeStat.mtimeMs);
+    expect(afterStat.ino).toBe(beforeStat.ino);
+    await controller.shutdown();
   });
 
   test("reports unsafe persisted file modes as invalid", async () => {
