@@ -61,6 +61,11 @@ export interface RouterControllerOptions {
   baseStream: StreamFunction<"openai-codex-responses", SimpleStreamOptions>;
 }
 
+function routingSessionKey(sessionId: string | undefined): string {
+  const normalized = sessionId?.trim();
+  return normalized ? normalized : "pi";
+}
+
 export async function createRouterController(
   options: RouterControllerOptions,
 ): Promise<RouterController> {
@@ -189,7 +194,7 @@ export async function createRouterController(
     return snapshot;
   };
   let displayAccountId: string | undefined;
-  let lastSuccessfulAccountId: string | undefined;
+  const lastSuccessfulAccountBySession = new Map<string, string>();
   let currentLabel = "none";
   let currentModelId = codexModels[0]?.id ?? "";
   let loggingEnabled = true;
@@ -280,6 +285,8 @@ export async function createRouterController(
           };
         }),
       );
+      const sessionKey = routingSessionKey(request.options?.sessionId);
+      const currentAccountId = lastSuccessfulAccountBySession.get(sessionKey);
       const selected = await selectAndReserve({
         stateStore,
         excludedAccountIds: request.excludedAccountIds,
@@ -287,11 +294,11 @@ export async function createRouterController(
           candidates,
           config,
           now: clock(),
-          ...(lastSuccessfulAccountId ? { currentAccountId: lastSuccessfulAccountId } : {}),
+          ...(currentAccountId ? { currentAccountId } : {}),
         },
         owner: {
           processId: process.pid,
-          sessionId: request.options?.sessionId ?? "pi",
+          sessionId: sessionKey,
           requestId: randomUUID(),
         },
         now: clock(),
@@ -358,8 +365,8 @@ export async function createRouterController(
       }
       usage.invalidate(accountId);
     },
-    recordSuccess(accountId) {
-      lastSuccessfulAccountId = accountId;
+    recordSuccess(accountId, sessionId) {
+      lastSuccessfulAccountBySession.set(routingSessionKey(sessionId), accountId);
     },
     release: (leaseToken) => reservations.release(leaseToken).then(() => undefined),
     renew: (leaseToken, ttlMs) => reservations.renew(leaseToken, clock(), ttlMs),
@@ -590,6 +597,7 @@ export async function createRouterController(
       priming.setForegroundActive(active);
     },
     async shutdown() {
+      lastSuccessfulAccountBySession.clear();
       await priming.shutdown();
     },
   };

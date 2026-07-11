@@ -50,7 +50,7 @@ export interface RoutedStreamDependencies {
     rejectedAccessToken: string | undefined,
     failure: FailureClass,
   ): Promise<void>;
-  recordSuccess(accountId: string): void;
+  recordSuccess(accountId: string, sessionId?: string): void;
   release(leaseToken: string): Promise<void>;
   renew(leaseToken: string, ttlMs: number): Promise<boolean>;
   recoveryDeadline(): number;
@@ -189,7 +189,7 @@ export function createRoutedStream(
                   pendingStart = undefined;
                 }
                 if (event.type === "done") {
-                  dependencies.recordSuccess(lease.accountId);
+                  dependencies.recordSuccess(lease.accountId, options?.sessionId);
                   await heartbeat.stop();
                   await release();
                   output.push(event);

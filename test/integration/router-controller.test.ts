@@ -9,6 +9,7 @@ import type {
 import { OPENAI_CODEX_MODELS } from "@earendil-works/pi-ai/providers/openai-codex.models";
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { deriveManagedAccountId } from "../../src/accounts/account-identity.ts";
+import { defaultConfig } from "../../src/config.ts";
 import {
   createRouterController,
   type RouterControllerOptions,
@@ -399,6 +400,275 @@ describe("RouterController", () => {
     await collectController(controller);
 
     expect(routedTokens).toEqual([manual.access, preferred.access]);
+    await controller.shutdown();
+  });
+
+  test("keeps successful hysteresis controller-local per effective session", async () => {
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    const { preferredAccountId, otherAccountId } = automaticTieAccountIds();
+    const preferred = makeCredentials(preferredAccountId, 3_000_000_000_000, "preferred");
+    const other = makeCredentials(otherAccountId, 3_000_000_000_000, "other");
+    const routedTokens: string[] = [];
+    const controller = await createRouterController({
+      paths: resolveRouterPaths(fixture.directory),
+      clock: () => 2_000_000_000_000,
+      oauth: { refresh: async () => preferred },
+      fetchImpl: async () => Response.json(completeUsageResponse),
+      baseStream: (_model, _context, options) => {
+        routedTokens.push(options?.apiKey ?? "");
+        return eventStream(successfulText());
+      },
+    });
+    const preferredId = await controller.vault.addFromOAuth("preferred", preferred);
+    const otherId = await controller.vault.addFromOAuth("other", other);
+
+    await controller.operations.use(preferredId);
+    await collectController(controller, { sessionId: "s1" });
+    await controller.operations.use(otherId);
+    await collectController(controller, { sessionId: "s2" });
+    await collectController(controller, { sessionId: "   " });
+    await controller.operations.use("auto");
+
+    await collectController(controller, { sessionId: "s1" });
+    await collectController(controller, { sessionId: "s2" });
+    await collectController(controller);
+    await collectController(controller, { sessionId: "" });
+    await collectController(controller, { sessionId: "  " });
+
+    expect(routedTokens).toEqual([
+      preferred.access,
+      other.access,
+      other.access,
+      preferred.access,
+      other.access,
+      other.access,
+      other.access,
+      other.access,
+    ]);
+    await controller.shutdown();
+  });
+
+  test("clears successful session affinity on shutdown", async () => {
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    const { preferredAccountId, otherAccountId } = automaticTieAccountIds();
+    const preferred = makeCredentials(preferredAccountId, 3_000_000_000_000, "preferred");
+    const other = makeCredentials(otherAccountId, 3_000_000_000_000, "other");
+    const routedTokens: string[] = [];
+    const controller = await createRouterController({
+      paths: resolveRouterPaths(fixture.directory),
+      clock: () => 2_000_000_000_000,
+      oauth: { refresh: async () => preferred },
+      fetchImpl: async () => Response.json(completeUsageResponse),
+      baseStream: (_model, _context, options) => {
+        routedTokens.push(options?.apiKey ?? "");
+        return eventStream(successfulText());
+      },
+    });
+    await controller.vault.addFromOAuth("preferred", preferred);
+    const otherId = await controller.vault.addFromOAuth("other", other);
+    await controller.operations.use(otherId);
+    await collectController(controller, { sessionId: "s1" });
+    await controller.operations.use("auto");
+    await controller.shutdown();
+
+    await collectController(controller, { sessionId: "s1" });
+
+    expect(routedTokens).toEqual([other.access, preferred.access]);
+  });
+
+  test("lets urgency outside the hysteresis band override session affinity", async () => {
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    const { preferredAccountId, otherAccountId } = automaticTieAccountIds();
+    const preferred = makeCredentials(preferredAccountId, 3_000_000_000_000, "preferred");
+    const other = makeCredentials(otherAccountId, 3_000_000_000_000, "other");
+    const routedTokens: string[] = [];
+    const controller = await createRouterController({
+      paths: resolveRouterPaths(fixture.directory),
+      clock: () => 2_000_000_000_000,
+      oauth: { refresh: async () => preferred },
+      fetchImpl: async (_input, init) => {
+        const rawAccountId = new Headers(init?.headers).get("ChatGPT-Account-Id");
+        return Response.json({
+          ...completeUsageResponse,
+          rate_limit: {
+            ...completeUsageResponse.rate_limit,
+            secondary_window: {
+              ...completeUsageResponse.rate_limit.secondary_window,
+              used_percent: rawAccountId === preferredAccountId ? 50 : 20,
+            },
+          },
+        });
+      },
+      baseStream: (_model, _context, options) => {
+        routedTokens.push(options?.apiKey ?? "");
+        return eventStream(successfulText());
+      },
+    });
+    const preferredId = await controller.vault.addFromOAuth("preferred", preferred);
+    await controller.vault.addFromOAuth("other", other);
+
+    await controller.operations.use(preferredId);
+    await collectController(controller, { sessionId: "s1" });
+    await controller.operations.use("auto");
+    await collectController(controller, { sessionId: "s1" });
+
+    expect(routedTokens).toEqual([preferred.access, other.access]);
+    await controller.shutdown();
+  });
+
+  test("does not share successful affinity between controllers", async () => {
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    const paths = resolveRouterPaths(fixture.directory);
+    const { preferredAccountId, otherAccountId } = automaticTieAccountIds();
+    const preferred = makeCredentials(preferredAccountId, 3_000_000_000_000, "preferred");
+    const other = makeCredentials(otherAccountId, 3_000_000_000_000, "other");
+    const routedTokens: string[] = [];
+    const options: RouterControllerOptions = {
+      paths,
+      clock: () => 2_000_000_000_000,
+      oauth: { refresh: async () => preferred },
+      fetchImpl: async () => Response.json(completeUsageResponse),
+      baseStream: (_model, _context, streamOptions) => {
+        routedTokens.push(streamOptions?.apiKey ?? "");
+        return eventStream(successfulText());
+      },
+    };
+    const first = await createRouterController(options);
+    await first.vault.addFromOAuth("preferred", preferred);
+    const otherId = await first.vault.addFromOAuth("other", other);
+    await first.operations.use(otherId);
+    await collectController(first, { sessionId: "s1" });
+    await first.operations.use("auto");
+
+    const second = await createRouterController(options);
+    await collectController(second, { sessionId: "s1" });
+
+    expect(routedTokens).toEqual([other.access, preferred.access]);
+    await first.shutdown();
+    await second.shutdown();
+  });
+
+  test("applies health vetoes before remembered session affinity", async () => {
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    const paths = resolveRouterPaths(fixture.directory);
+    const { preferredAccountId, otherAccountId } = automaticTieAccountIds();
+    const preferred = makeCredentials(preferredAccountId, 3_000_000_000_000, "preferred");
+    const other = makeCredentials(otherAccountId, 3_000_000_000_000, "other");
+    const routedTokens: string[] = [];
+    const controller = await createRouterController({
+      paths,
+      clock: () => 2_000_000_000_000,
+      oauth: { refresh: async () => preferred },
+      fetchImpl: async () => Response.json(completeUsageResponse),
+      baseStream: (_model, _context, options) => {
+        routedTokens.push(options?.apiKey ?? "");
+        return eventStream(successfulText());
+      },
+    });
+    const preferredId = await controller.vault.addFromOAuth("preferred", preferred);
+    await controller.vault.addFromOAuth("other", other);
+    const stateStore = createAtomicJsonStore<RuntimeStateFile>({
+      path: paths.state,
+      schema: RuntimeStateFileSchema,
+      createDefault: () => structuredClone(defaultRuntimeState),
+    });
+
+    await controller.operations.use(preferredId);
+    await collectController(controller, { sessionId: "s1" });
+    await controller.operations.use("auto");
+    await stateStore.update((state) => ({
+      ...state,
+      blocks: [
+        {
+          accountId: preferredId,
+          kind: "quota",
+          blockedAt: 2_000_000_000_000,
+          retryAt: 2_000_003_600_000,
+          estimated: false,
+        },
+      ],
+    }));
+    await collectController(controller, { sessionId: "s1" });
+
+    await stateStore.update((state) => ({ ...state, blocks: [] }));
+    await controller.operations.use(preferredId);
+    await collectController(controller, { sessionId: "s1" });
+    await controller.operations.use("auto");
+    await controller.vault.markNeedsReauth(preferredId, preferred.access, "invalid_grant");
+    await collectController(controller, { sessionId: "s1" });
+
+    await controller.vault.addFromOAuth("preferred", preferred);
+    await controller.operations.use(preferredId);
+    await collectController(controller, { sessionId: "s1" });
+    await controller.operations.use("auto");
+    await stateStore.update((state) => ({
+      ...state,
+      reservations: [
+        {
+          accountId: preferredId,
+          leaseToken: "synthetic-primer-affinity-veto",
+          owner: { processId: 7, sessionId: "primer", requestId: "primer" },
+          createdAt: 2_000_000_000_000,
+          expiresAt: 2_000_000_060_000,
+          kind: "primer",
+        },
+      ],
+    }));
+    await collectController(controller, { sessionId: "s1" });
+
+    expect(routedTokens).toEqual([
+      preferred.access,
+      other.access,
+      preferred.access,
+      other.access,
+      preferred.access,
+      other.access,
+    ]);
+    await controller.shutdown();
+  });
+
+  test("prefers a fresh tier over remembered stale usage", async () => {
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    const { preferredAccountId, otherAccountId } = automaticTieAccountIds();
+    const preferred = makeCredentials(preferredAccountId, 3_000_000_000_000, "preferred");
+    const other = makeCredentials(otherAccountId, 3_000_000_000_000, "other");
+    let now = 2_000_000_000_000;
+    let preferredOffline = false;
+    const routedTokens: string[] = [];
+    const controller = await createRouterController({
+      paths: resolveRouterPaths(fixture.directory),
+      clock: () => now,
+      oauth: { refresh: async () => preferred },
+      fetchImpl: async (_input, init) => {
+        const rawAccountId = new Headers(init?.headers).get("ChatGPT-Account-Id");
+        if (preferredOffline && rawAccountId === preferredAccountId) {
+          throw new Error("synthetic usage outage");
+        }
+        return Response.json(completeUsageResponse);
+      },
+      baseStream: (_model, _context, options) => {
+        routedTokens.push(options?.apiKey ?? "");
+        return eventStream(successfulText());
+      },
+    });
+    const preferredId = await controller.vault.addFromOAuth("preferred", preferred);
+    await controller.vault.addFromOAuth("other", other);
+    await controller.operations.refresh(preferredId);
+    await controller.operations.use(preferredId);
+    await collectController(controller, { sessionId: "s1" });
+    await controller.operations.use("auto");
+    now += defaultConfig.usageFreshnessMs + 1;
+    preferredOffline = true;
+
+    await collectController(controller, { sessionId: "s1" });
+
+    expect(routedTokens).toEqual([preferred.access, other.access]);
     await controller.shutdown();
   });
 

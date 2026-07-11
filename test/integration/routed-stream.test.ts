@@ -37,7 +37,7 @@ function dependencies(accounts: string[], baseStream: RoutedStreamDependencies["
   const selected: string[] = [];
   const released: string[] = [];
   const recorded: string[] = [];
-  const succeeded: string[] = [];
+  const succeeded: Array<[string, string | undefined]> = [];
   const renewed: string[] = [];
   const value: RoutedStreamDependencies = {
     selectAndReserve: async ({ excludedAccountIds }) => {
@@ -71,8 +71,8 @@ function dependencies(accounts: string[], baseStream: RoutedStreamDependencies["
     recordFailure: async (accountId) => {
       recorded.push(accountId);
     },
-    recordSuccess: (accountId) => {
-      succeeded.push(accountId);
+    recordSuccess: (accountId, sessionId?: string) => {
+      succeeded.push([accountId, sessionId]);
     },
     release: async (leaseToken) => {
       released.push(leaseToken);
@@ -100,7 +100,7 @@ describe("RoutedStream", () => {
     const routed = createRoutedStream(setup.value);
 
     const events = await collect(
-      routed(model, context, { reasoning: "high", sessionId: "session-1" }),
+      routed(model, context, { reasoning: "high", sessionId: "  session-1  " }),
     );
 
     expect(events.map((event) => event.type)).toEqual([
@@ -113,12 +113,12 @@ describe("RoutedStream", () => {
     expect(setup.selected).toEqual(["a", "b"]);
     expect(setup.released.sort()).toEqual(["lease-a", "lease-b"]);
     expect(setup.recorded).toEqual(["a"]);
-    expect(setup.succeeded).toEqual(["b"]);
+    expect(setup.succeeded).toEqual([["b", "  session-1  "]]);
     expect(optionsSeen[1]).toEqual(
       expect.objectContaining({
         apiKey: "token-b",
         reasoning: "high",
-        sessionId: "session-1",
+        sessionId: "  session-1  ",
       }),
     );
   });
@@ -154,6 +154,37 @@ describe("RoutedStream", () => {
     expect(events.map((event) => event.type)).toEqual(["start", "text_start", "error"]);
     expect(setup.selected).toEqual(["a"]);
     expect(setup.recorded).toEqual(["a"]);
+    expect(setup.succeeded).toEqual([]);
+  });
+
+  test("does not record success for an aborted request", async () => {
+    const setup = dependencies(["a"], () => eventStream(successfulText()));
+    const controller = new AbortController();
+    controller.abort(new Error("synthetic cancellation"));
+
+    const events = await collect(
+      createRoutedStream(setup.value)(model, context, {
+        signal: controller.signal,
+        sessionId: "cancelled-session",
+      }),
+    );
+
+    expect(events.at(-1)?.type).toBe("error");
+    expect(setup.succeeded).toEqual([]);
+  });
+
+  test("does not record success when the provider iterator ends without done", async () => {
+    const setup = dependencies(["a"], (() =>
+      (async function* () {
+        yield start();
+      })()) as unknown as RoutedStreamDependencies["baseStream"]);
+
+    const events = await collect(
+      createRoutedStream(setup.value)(model, context, { sessionId: "unterminated-session" }),
+    );
+
+    expect(events.map((event) => event.type)).toEqual(["error"]);
+    expect(setup.succeeded).toEqual([]);
   });
 
   test("force refreshes the first generic 401 and retries the same account", async () => {
