@@ -8,6 +8,7 @@ export interface ReservedSelection {
   decision: SelectionDecision;
   recoverableAccountIds: string[];
   reservation?: Reservation;
+  foregroundActiveBefore?: number;
 }
 
 export async function selectAndReserve(input: {
@@ -25,12 +26,14 @@ export async function selectAndReserve(input: {
     );
     const candidates = input.request.candidates.map((candidate) => {
       const block = state.blocks.find((value) => value.accountId === candidate.accountId);
-      const reservation = liveReservations.find((value) => value.accountId === candidate.accountId);
-      const { block: _staleBlock, reservation: _staleReservation, ...current } = candidate;
+      const primerLease = liveReservations.find(
+        (value) => value.kind === "primer" && value.accountId === candidate.accountId,
+      );
+      const { block: _staleBlock, primerLease: _stalePrimerLease, ...current } = candidate;
       return {
         ...current,
         ...(block ? { block } : {}),
-        ...(reservation ? { reservation } : {}),
+        ...(primerLease ? { primerLease } : {}),
       };
     });
     const selectableCandidates = candidates.filter(
@@ -63,9 +66,9 @@ export async function selectAndReserve(input: {
           (explanation.rejectionCode === "blocked" &&
             candidate?.block?.retryAt !== undefined &&
             candidate.block.retryAt > input.now) ||
-          (explanation.rejectionCode === "reserved" &&
-            candidate?.reservation !== undefined &&
-            candidate.reservation.expiresAt > input.now)
+          (explanation.rejectionCode === "primer_active" &&
+            candidate?.primerLease !== undefined &&
+            candidate.primerLease.expiresAt > input.now)
         );
       })
       .map((candidate) => candidate.accountId);
@@ -82,7 +85,10 @@ export async function selectAndReserve(input: {
       expiresAt: input.now + input.request.config.reservationTtlMs,
       kind: "foreground",
     };
-    result = { decision, recoverableAccountIds, reservation };
+    const foregroundActiveBefore = liveReservations.filter(
+      (value) => value.kind === "foreground" && value.accountId === decision.accountId,
+    ).length;
+    result = { decision, recoverableAccountIds, reservation, foregroundActiveBefore };
     return {
       ...state,
       reservations: [...liveReservations, reservation],
