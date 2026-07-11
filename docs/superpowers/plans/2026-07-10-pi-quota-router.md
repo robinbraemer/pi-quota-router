@@ -1,5 +1,7 @@
 # Pi Quota Router Implementation Plan
 
+> **Historical plan:** This records the original implementation sequence. Its exclusive-foreground reservation steps were superseded by the 2026-07-11 concurrency amendment in the [implemented design](../specs/2026-07-10-pi-quota-router-design.md); [Routing policy](../../policy.md) is authoritative for current behavior.
+
 > Required sub-skill: use superpowers:test-driven-development for every implementation task and superpowers:verification-before-completion before claiming a task complete.
 
 **Goal:** Build and publish a normal-Pi extension that routes an unchanged Codex model across equivalent ChatGPT OAuth accounts using fresh quota, safe explicit priming, urgency-based draining, cross-process coordination, and replay-safe failover.

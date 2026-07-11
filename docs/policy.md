@@ -9,7 +9,7 @@ Automatic routing rejects an account when any of these conditions is true:
 - routing is disabled;
 - OAuth is marked `needsReauth`;
 - a live quota/auth/transient block exists;
-- another request holds a live reservation;
+- an account primer holds a live lease;
 - no usage snapshot is available;
 - the snapshot is more than 24 hours old;
 - the weekly window or its reset timestamp is unknown;
@@ -17,6 +17,8 @@ Automatic routing rejects an account when any of these conditions is true:
 - the account is untouched and has not obtained a reset clock through confirmed priming;
 - 5-hour remaining quota is below 10%;
 - weekly remaining quota is below 3%.
+
+The exported `Candidate` type represents the exclusive fence as `primerLease?: Reservation`; foreground leases are lifecycle records, not candidate-health input. A live primer rejection uses `primer_active`, replacing the former generic `reserved` selection rejection.
 
 Usage younger than five minutes is fresh. Data from five minutes through 24 hours is stale fallback data. Snapshots are persisted for restart-safe cache and fallback behavior, but a recorded 5-hour or weekly reset immediately expires the cache even inside the normal freshness period. The router uses a fresh eligible tier whenever one exists. Only when no fresh account is eligible may stale data participate, with five percentage points subtracted from both remaining windows before the headroom checks.
 
@@ -34,7 +36,7 @@ urgency = weeklyRemainingFraction / hoursToReset
 
 Higher urgency wins. It is the fraction of the weekly allowance that must be consumed per hour to avoid expiring unused. Thus an account with more remaining quota and fewer days left normally wins, instead of accounts being equalized by used percentage.
 
-The top 10% urgency band is hysteresis/tie territory. Its current account is the account that last completed a routed request, not merely the account most recently shown after login or selected for a failed attempt:
+The top 10% urgency band is hysteresis/tie territory. Its current account is the account that last completed a routed request in the same effective Pi session and controller instance, not merely the account most recently shown after login or selected for a failed attempt. Affinity is not persisted or shared between sessions or controllers, and shutdown clears it:
 
 1. If the current account remains eligible and is within 10% of the top urgency, retain it.
 2. Otherwise consider all candidates within 10% of the top urgency.
@@ -48,13 +50,17 @@ Stable managed ids are truncated SHA-256 derivatives of raw Codex account ids. R
 
 `/quota-router use <account>` sets a deliberate manual override. The router does not fetch usage before selecting that account, and the account bypasses automatic freshness, untouched-clock, and 10%/3% headroom checks. This makes the command genuinely forceful.
 
-The manual account is still unavailable when it needs reauthentication, has an active block, or has a live reservation. The router does not silently fall back to an automatically ranked account in that case; it reports `manual_account_unavailable`. Use `/quota-router use auto` to resume automatic ranking.
+The manual account is still unavailable when it needs reauthentication, has an active block, or has a live account primer lease. Foreground leases are advisory and do not veto the manual account. The router does not silently fall back to an automatically ranked account in an unavailable case; it reports `manual_account_unavailable`. Use `/quota-router use auto` to resume automatic ranking.
 
 ## Reservations and concurrency
 
-Selection and reservation happen inside one locked state update. Foreground and primer leases use a two-minute abandonment window and renew every 40 seconds while their work remains active. Completion, error, or cancellation releases them immediately; crashed owners stop renewing and expire naturally. Two concurrent Pi controllers sharing a profile therefore cannot acquire the same free account.
+Selection and lease creation happen inside one locked state update. Each foreground request appends a distinct lease even when other foreground leases already exist for the selected account; those leases are advisory for foreground eligibility and there is no concurrency cap. Their independent tokens keep renewal, cancellation, failure, and release request-local.
 
-Primer work renews both its singleton sweep lease and account lease. Foreground activity stops primer work so synthetic spend does not compete with a user request.
+Primer fencing remains exclusive and owner-agnostic. Any live account primer lease vetoes automatic and manual foreground selection until release or expiry. Conversely, any live foreground lease for an account prevents priming that account, including a lease left by a crashed process, so synthetic spend cannot overlap user work. Primer work renews both its singleton sweep lease and account lease, and foreground activity stops primer work.
+
+Foreground and primer leases use a two-minute abandonment window and renew every 40 seconds while their work remains active. Completion, error, or cancellation releases only that request's lease immediately. A crashed foreground owner stops renewing: its lease continues to fence primer acquisition until expiry but does not veto another foreground request. Losing renewal terminates only the affected request.
+
+The persisted config and runtime-state schemas remain version 1. Multiple foreground leases for one account use the existing reservation array and require no migration or startup rewrite. Forward updates and rollbacks should restart all Pi processes sharing a profile together. During a mixed-version interval, both versions remain primer-safe, but an old controller still treats every live foreground lease as exclusive while a new controller treats it as advisory, so foreground selection is intentionally asymmetric until the restart completes.
 
 ## Failure and recovery policy
 
@@ -75,7 +81,7 @@ Concurrent ordinary usage refreshes for one account are coalesced. A forced refr
 
 OAuth token refresh is likewise single-flight per account within a process. Cancelling one caller stops only that caller's wait, while the shared refresh continues for other callers.
 
-When all known accounts are temporarily unavailable, recovery rechecks persisted blocks, reservations, and the managed account list at most once per minute. It resumes as soon as any recoverable account becomes available or a new account is logged in. Repeated recovery waits within one routed request share one cumulative configured deadline rather than restarting the limit.
+When all known accounts are temporarily unavailable, recovery rechecks persisted blocks, live account primer leases, and the managed account list at most once per minute. Foreground leases do not delay recovery. It resumes as soon as any recoverable account becomes available or a new account is logged in. Repeated recovery waits within one routed request share one cumulative configured deadline rather than restarting the limit.
 
 ## Priming policy
 

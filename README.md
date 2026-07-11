@@ -2,7 +2,7 @@
 
 Pi Quota Router is a normal-Pi extension for several equivalent ChatGPT Codex accounts. It keeps the selected `openai-codex` model and thinking level unchanged, but chooses the account whose useful weekly quota is most urgent to spend.
 
-It refreshes 5-hour and weekly usage before automatic selection, reserves accounts across concurrent Pi processes, refreshes OAuth tokens under a cross-process lock, and can fail over only before model-visible output. Optional one-shot priming can start an untouched account's weekly reset clock, but only after two explicit confirmations for that request.
+It refreshes 5-hour and weekly usage before automatic selection, tracks concurrent foreground requests with independent leases, refreshes OAuth tokens under a cross-process lock, and can fail over only before model-visible output. Foreground leases are advisory for routing, so concurrent requests may share an eligible account; primer leases remain exclusive so synthetic spend never overlaps foreground work. Optional one-shot priming can start an untouched account's weekly reset clock, but only after two explicit confirmations for that request.
 
 ## Install from GitHub
 
@@ -45,7 +45,7 @@ After at least one account has a weekly reset timestamp, ordinary Codex prompts 
 
 ## How automatic selection works
 
-An account must first be healthy and usable. Automatic routing excludes accounts that need reauthentication, are blocked or reserved, lack usable quota data, are more than 24 hours stale, have less than 10% 5-hour headroom, have less than 3% weekly headroom, or are untouched without an observed weekly clock.
+An account must first be healthy and usable. Automatic routing excludes accounts that need reauthentication, are blocked, have a live account primer lease, lack usable quota data, are more than 24 hours stale, have less than 10% 5-hour headroom, have less than 3% weekly headroom, or are untouched without an observed weekly clock. Live foreground leases do not make an otherwise eligible account unavailable to another foreground request.
 
 For each eligible account:
 
@@ -64,7 +64,7 @@ The highest urgency wins. For example:
 
 `work` is selected because much more useful quota will expire per hour. This intentionally drains expiring quota instead of equalizing percentages. Equalizing can preserve a neat balance while allowing a large near-reset allowance to disappear unused.
 
-Scores within 10% are treated as tied. The router retains the eligible account that last completed a routed request within that band; a login display update or failed route does not receive this preference. Otherwise it prefers the least weekly quota remaining, then the most 5-hour quota remaining, then the stable managed account id. See [the exact policy](docs/policy.md).
+Scores within 10% are treated as tied. Within each controller and effective Pi session, the router retains the eligible account that last completed a routed request in that band; another session, controller, restart, login display update, or failed route does not share or receive this preference. Otherwise it prefers the least weekly quota remaining, then the most 5-hour quota remaining, then the stable managed account id. See [the exact policy](docs/policy.md).
 
 ## Priming untouched accounts
 
@@ -108,7 +108,7 @@ The confirmations authorize only the current command. They do not change `config
 | `/quota-router path` | Print every router data path. |
 | `/quota-router log [on\|off]` | Show, enable, or disable the bounded diagnostic event log for this Pi session. |
 
-A manual account is selected without first fetching quota usage and bypasses automatic freshness, untouched-clock, and headroom checks. It is still rejected if it needs reauthentication or has an active block/reservation. If labels are duplicated, select the account by its managed id from `list`. Return to `auto` when the exceptional task is finished.
+A manual account is selected without first fetching quota usage and bypasses automatic freshness, untouched-clock, and headroom checks. It is still rejected if it needs reauthentication, has an active block, or has a live account primer lease. Foreground peers do not veto the override. If labels are duplicated, select the account by its managed id from `list`. Return to `auto` when the exceptional task is finished.
 
 ## Footer legend
 
@@ -140,6 +140,8 @@ The containing directory is `0700`. Same-directory temporary files, lock targets
 
 Cached usage snapshots survive Pi restarts. The router reuses them while fresh, can fall back to them conservatively for up to 24 hours after a fetch failure, and refreshes them when their freshness or recorded reset time expires.
 
+Foreground sharing does not change the version-one config or state schemas and requires no migration or startup rewrite. Every foreground request still owns a distinct renewable lease, while any live foreground lease for an account fences priming that account and any live account primer lease fences foreground selection regardless of owner process state.
+
 ## Update and uninstall
 
 Update the GitHub-installed package through Pi:
@@ -147,6 +149,10 @@ Update the GitHub-installed package through Pi:
 ```bash
 pi update --extensions
 ```
+
+Coordinate forward updates and rollbacks across every Pi process that shares the same profile, then restart them together. Mixed versions remain primer-safe because both versions honor primer leases, but an older process treats a new foreground lease as exclusive while a new process treats an old foreground lease as advisory; the temporary asymmetry can change foreground routing until all processes run the same version.
+
+Production rollout is blocked until an actual Pi release or commit proves that Codex WebSocket connections, continuation state, and transport-fallback state are partitioned by account identity as well as session. The pinned Pi 0.80.6 baseline keys those caches only by session, so tests with injected streams cannot establish safe live multi-account reuse. Do not use valuable production accounts to close this integration gap.
 
 Remove the extension while retaining its account vault and state:
 

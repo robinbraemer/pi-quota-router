@@ -4,6 +4,8 @@
 
 **Status:** Implemented
 
+**Concurrency amendment:** 2026-07-11
+
 **Target:** normal Pi (`@earendil-works/pi-*`), Node.js `>=22.19.0`
 **Scope:** equivalent ChatGPT Codex OAuth accounts only
 
@@ -18,7 +20,7 @@ The router does not merely choose the lowest usage percentage. It:
 3. Spends quota with the highest expiry urgency first.
 4. Drains the account with the least weekly quota remaining when urgency is materially tied.
 5. Supports explicit synthetic priming for confirmed first-use rolling windows.
-6. Coordinates concurrent Pi processes so they do not stampede one account.
+6. Coordinates concurrent Pi processes with advisory foreground leases and exclusive primer fencing.
 7. Rotates transparently only before output, where replay is safe.
 
 ## Goals
@@ -207,12 +209,12 @@ The provider override is the only component coupled to Pi's streaming types. Sel
 
 ### `src/routing/reservation-store.ts`
 
-- Persists short account leases in non-secret state.
-- Keys leases by account id, process id, session id, and request id.
-- Excludes leases owned by other live requests.
-- Renews foreground and primer leases while their work remains active.
+- Persists short foreground, account-primer, and singleton-sweep leases in non-secret state.
+- Gives every lease a unique token plus account id and process/session/request owner metadata.
+- Acquires account-primer leases only when no live lease exists for that account, regardless of owner identity.
+- Renews and releases foreground and primer leases by token while their work remains active.
 - Expires abandoned leases after two minutes.
-- Acquires the chosen lease inside the same write lock used to re-check candidates.
+- Foreground selection appends its distinct lease inside the same state-file lock used to re-check candidates.
 
 ### `src/priming/priming-controller.ts`
 
@@ -233,7 +235,7 @@ The provider override is the only component coupled to Pi's streaming types. Sel
 - Marks replay unsafe only after text, thinking, or tool-call content starts.
 - On a pre-output quota/auth error, blocks the account, releases the lease, and retries another account up to five times.
 - On a classified post-output failure, records the account block and forwards the error unchanged without replaying.
-- If all accounts are temporarily blocked before output, waits abortably for the earliest recovery up to the configured limit (six hours by default).
+- If all accounts are temporarily blocked or account-primer fenced before output, waits abortably for the earliest recovery up to the configured limit (six hours by default).
 - Reuses one absolute recovery deadline across every wait in the routed request and resumes when any recoverable account becomes available.
 
 ### `src/status/status-controller.ts`
@@ -344,10 +346,11 @@ For each account:
 - 5-hour used percentage and reset time.
 - Weekly used percentage and reset time.
 - Account availability, auth health, and cooldown.
-- Primer state.
-- Reservation state.
+- Primer confirmation state and live account-primer lease.
 - Manual override.
-- Last successfully completed routed account for hysteresis, separate from the account shown after login or a failed route.
+- Last successfully completed routed account for the same effective Pi session and controller instance, separate from the account shown after login or a failed route.
+
+The exported `Candidate` interface exposes a live exclusive fence as `primerLease?: Reservation`; foreground leases are deliberately absent from candidate-health input. Selection explanations use `primer_active` for this rejection rather than the former generic `reserved` code.
 
 ### Eligibility
 
@@ -355,7 +358,7 @@ An account is ineligible when:
 
 - It needs reauthentication.
 - It is in a live quota/auth/transient cooldown.
-- Another live request owns its reservation.
+- A live account primer lease exists.
 - Its usage is unknown or older than 24 hours.
 - Its weekly reset timestamp is missing or has elapsed without fresh post-reset usage.
 - Its remaining 5-hour quota is below 10%.
@@ -378,7 +381,7 @@ Higher urgency wins because it represents more quota that must be spent per hour
 
 ### Tie-breakers
 
-Candidates within 10% of the highest urgency are materially tied. If the last successfully completed routed account is in that band and passes all eligibility checks, retain it first to preserve prompt-cache affinity. A login display update or failed route does not change this history. Otherwise resolve the band in this order:
+Candidates within 10% of the highest urgency are materially tied. If the account that last completed successfully in the same effective Pi session and controller instance is in that band and passes all eligibility checks, retain it first to preserve prompt-cache affinity. Affinity is controller-local, is not shared across sessions or controllers, and is cleared on shutdown. A login display update or failed route does not change it. Otherwise resolve the band in this order:
 
 1. Least weekly remaining quota that still passes the 3% headroom floor.
 2. Most 5-hour remaining quota.
@@ -388,7 +391,7 @@ This avoids account churn for negligible score improvements while keeping select
 
 ### Manual override
 
-A manually selected account is chosen without a preliminary usage fetch and bypasses automatic freshness, untouched-clock, and headroom checks, but remains unavailable when it needs reauthentication, has an active block, or has a live reservation. The override stays configured until the operator runs `/quota-router use auto`; the router never silently substitutes an automatically ranked account.
+A manually selected account is chosen without a preliminary usage fetch and bypasses automatic freshness, untouched-clock, and headroom checks, but remains unavailable when it needs reauthentication, has an active block, or has a live account primer lease. Foreground leases do not veto the override. The override stays configured until the operator runs `/quota-router use auto`; the router never silently substitutes an automatically ranked account.
 
 ### Headroom limitation
 
@@ -405,7 +408,7 @@ An account is a priming candidate only when a fresh usage snapshot shows:
 - 0% used in both active windows.
 - No observed weekly reset timestamp.
 - Healthy authentication.
-- No cooldown, reservation, or prior successful primer.
+- No cooldown, live account or sweep primer lease, foreground lease, or prior successful primer.
 
 The operator must confirm both deliberate quota spend and the first-use rolling-window assumption for every `/quota-router prime` invocation. Those confirmations are ephemeral and do not mutate the persistent priming booleans. The extension does not ship a provider claim that first use always starts the window.
 
@@ -463,7 +466,7 @@ Before any output, the wrapper waits for the earliest known recovery when:
 - The wait remains inside the configured limit, which defaults to six hours.
 - The caller's abort signal remains active.
 
-The wait re-checks persisted state and the managed account list at most once per minute, so a peer process login, refresh, usage correction, or reservation release can wake the request as soon as any recoverable account is available. Every wait in one routed request shares one cumulative configured deadline. Escape/user abort ends the wait immediately.
+The wait re-checks persisted state and the managed account list at most once per minute, so a peer process login, refresh, usage correction, block expiry, or account-primer release can wake the request as soon as any recoverable account is available. Foreground leases never delay recovery. Every wait in one routed request shares one cumulative configured deadline. Escape/user abort ends the wait immediately.
 
 ## Concurrency model
 
@@ -472,12 +475,22 @@ Multiple Pi processes share the same vault and state directory.
 - Every mutation occurs under a file lock.
 - Writers reload and revalidate after locking.
 - Account selection and lease acquisition are one atomic critical section.
-- A selected account is unavailable to other request ids until release or lease expiry.
+- Each foreground request appends a distinct lease, even when another foreground request already uses the selected account; foreground leases are advisory for foreground eligibility and have no concurrency cap.
+- Foreground renewal, cancellation, failure, and release are token-local. A crashed foreground lease does not veto another foreground request, but it fences primer acquisition until expiry.
+- An account primer lease exclusively vetoes automatic and manual foreground selection regardless of owner identity or process liveness; any live foreground lease for that account vetoes account-primer acquisition.
 - OAuth refresh uses an account-specific lock and re-check-after-lock.
 - Usage fetches are coalesced per process; a forced request arriving during an ordinary request queues one follow-up fetch. Persisted snapshots are reloaded before each controller lookup.
 - Priming uses a singleton lease, so only one process can prime at a time.
 - Locks have bounded acquisition time and stale-owner recovery.
 - Lock timeout never causes an unsafe write; the operation returns a visible retryable error.
+
+## Compatibility and rollout
+
+The config and runtime-state schemas remain version 1. Multiple foreground leases reuse the existing reservation array, so no migration, startup rewrite, concurrency cap, or reset-reservations conversion is required.
+
+Forward updates and rollbacks require coordinated restarts of every Pi process sharing a profile. Mixed versions remain primer-safe because both old and new controllers treat primer leases as exclusive. They are intentionally asymmetric for foreground routing: an old controller treats any foreground lease as exclusive, while a new controller ignores foreground leases when deciding foreground eligibility.
+
+Production rollout remains blocked until an actual Pi release or commit proves that Codex WebSocket connection reuse, continuation state, and transport-fallback state are partitioned by account identity as well as session. The pinned Pi 0.80.6 implementation keys all three by session only; fake-provider and injected-stream tests cannot prove this external integration boundary, and live production provider requests are outside this design's validation scope.
 
 ## Commands and UX
 
@@ -523,7 +536,7 @@ The final field is `auto`, `manual`, or `login`; unknown cached usage or reset v
 
 ## Observability
 
-Each atomic selection persists a credential-free `lastSelection` explanation in `state.json`, including candidate freshness, remaining percentages, urgency, eligibility reasons, and the tie-break result. The bounded `events.ndjson` log records selected accounts, quota/auth invalidations, and detached primer failures with managed ids rather than raw Codex account ids. `/quota-router log off` disables new diagnostic entries for the current controller process.
+Each atomic selection persists a credential-free `lastSelection` explanation in `state.json`, including candidate freshness, remaining percentages, urgency, eligibility reasons, and the tie-break result. The bounded `events.ndjson` log records selected accounts, quota/auth invalidations, and detached primer failures with managed ids rather than raw Codex account ids. An `account_selected` event includes only the aggregate `foregroundActiveBefore` count for overlap diagnostics, never peer lease tokens or owner process/session/request identifiers. `/quota-router log off` disables new diagnostic entries for the current controller process.
 
 ## Testing strategy
 
@@ -535,7 +548,7 @@ Each atomic selection persists a credential-free `lastSelection` explanation in 
 - Manual selection wins while healthy.
 - Stale data is penalized and fresh data wins.
 - Untouched/no-clock accounts are excluded until primed or manually selected.
-- Hysteresis retains the last successfully completed routed account within the 10% band and ignores login display changes and failed routes.
+- Hysteresis retains the last successfully completed routed account within the same controller and effective session inside the 10% band, ignores login display changes and failed routes, and is cleared on shutdown.
 - Deterministic account id resolves complete ties.
 
 ### Priming tests
@@ -544,7 +557,7 @@ Each atomic selection persists a credential-free `lastSelection` explanation in 
 - One singleton primer runs across concurrent controllers.
 - One confirmed command sends at most one provider request and never enables future background work.
 - Primer uses no history or tools.
-- Primer does not block a foreground request.
+- A live account primer blocks foreground selection, and any live foreground lease for that account blocks primer acquisition, regardless of owner process liveness.
 - Successful confirmation requires a newly observed weekly reset.
 - Inconclusive primer applies a one-hour retry cooldown.
 - Provider failure still force-refreshes usage, records an observed reset, and preserves `failed` status.
@@ -567,7 +580,9 @@ Each atomic selection persists a credential-free `lastSelection` explanation in 
 - Cross-process refresh reuses the peer's newly persisted token.
 - Selection plus reservation is atomic.
 - Abandoned leases expire.
-- Two controllers never reserve the same account simultaneously.
+- Concurrent controllers may append distinct foreground leases for the same account without lost updates.
+- Foreground cancellation, renewal loss, release, and replay-safe failover remain isolated by lease token while peers continue.
+- Mixed old/new version behavior remains primer-safe while foreground exclusivity differs.
 - Duplicate `accountId` login updates rather than duplicates.
 - Successful reauthentication clears the account's permanent auth block.
 - Stale auth failures cannot invalidate credentials installed by a concurrent re-login.
@@ -589,6 +604,7 @@ Each atomic selection persists a credential-free `lastSelection` explanation in 
 - Provider and event names remain `openai-codex`.
 - Thinking levels pass through unchanged.
 - Package installs outside a Pi monorepo and resolves only public exports.
+- Production account use remains blocked until a concrete Pi release partitions WebSocket connection, continuation, and fallback state by account identity.
 
 ## Toolchain and dependency policy
 
@@ -618,6 +634,7 @@ A release is blocked unless:
 - A clean external install can load the extension and list mirrored Codex models.
 - End-to-end fake-provider tests prove selection, reservation, pre-output rotation, post-output non-replay, primer confirmation, and abort handling.
 - README behavior matches the executable selection policy tests.
+- Coordinated forward/rollback restart guidance and mixed-version asymmetry are documented.
 
 ## Success criteria
 
@@ -627,7 +644,7 @@ A release is blocked unless:
 - Similar-urgency accounts drain the least weekly remaining safe account.
 - Synthetic primer spend occurs only after explicit confirmation and is verified from fresh usage.
 - No task starts below the configured 5-hour or weekly headroom floor unless manually forced.
-- Parallel Pi processes do not select the same free account concurrently.
+- Parallel Pi processes may select the same healthy account concurrently with distinct leases, while primer work remains exclusively fenced.
 - Token refresh races cannot burn a rotating refresh token.
 - Failover before output is transparent; failover after output never replays.
 - The extension never changes the user's model or thinking level.

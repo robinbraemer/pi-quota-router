@@ -24,11 +24,11 @@ Start with:
 | `Codex login failed. Please try again.` | Retry the login and check connectivity. Upstream OAuth details are intentionally hidden because they may contain credentials. |
 | Footer still shows `none · login` after successful login | Run `/quota-router list` to confirm the account, then `/quota-router status`. Current versions rerender immediately; update the Git package if the stale footer persists. |
 | `Ambiguous Codex account label` | Run `/quota-router list` and repeat `use`, `refresh`, or `prime` with the intended managed account id. Duplicate labels are never resolved arbitrarily. |
-| `no_eligible_accounts` | Refresh usage, inspect policy/headroom, prime confirmed untouched accounts, or wait for cooldowns. A fresh non-exhausted result clears an estimated quota block, but not an authentication or transient block. A deliberate `/quota-router use <account>` can bypass automatic headroom. |
-| `manual_account_unavailable` | Reauthenticate/clear the account's block, wait for its reservation, or run `/quota-router use auto`. |
+| `no_eligible_accounts` | Refresh usage, inspect policy/headroom, prime confirmed untouched accounts, or wait for cooldowns or an active account primer lease. Foreground leases do not make an account ineligible. A fresh non-exhausted result clears an estimated quota block, but not an authentication or transient block. A deliberate `/quota-router use <account>` can bypass automatic headroom. |
+| `manual_account_unavailable` | Reauthenticate or clear the account's block, wait for its active account primer lease, or run `/quota-router use auto`. Foreground peers do not veto manual routing. |
 | `not_authorized` from prime | Invoke `/quota-router prime ...` interactively and accept both confirmations. Authorization applies only to that invocation. |
 | `not_candidate` from prime | The account is already confirmed, is not untouched, or is inside the one-hour primer retry cooldown. |
-| `reserved` from prime | Another foreground/primer request owns the account or another process owns the singleton sweep. Wait for active work to finish; a crashed owner's lease expires within two minutes. |
+| `reserved` from prime | At least one foreground lease, an account primer lease, or another process's singleton sweep lease is active. Wait for all foreground work or the existing primer/sweep to finish; a crashed owner's lease still fences priming until it expires within two minutes. |
 | `busy` from prime | Foreground agent work is active. Wait until Pi settles. |
 | `Codex model ... is unavailable for priming` | Select a registered `openai-codex` model and invoke prime again. The rejected command made no usage/provider request and did not start the retry cooldown. |
 | `inconclusive` from prime | No weekly reset appeared after the minimal request. Wait one hour; do not assume the rolling-window behavior. |
@@ -57,7 +57,7 @@ Start with:
 
 A quota/auth failure before text, thinking, or tool-call output may rotate transparently up to five attempts. A lone transport `start` is not visible output. Once any visible/model-action output begins, the router forwards the error and never replays; retry the turn manually after resolving the account.
 
-Ctrl-C/Escape aborts usage work and all-limited recovery waits. Active reservations renew until completion; if a process is killed ungracefully, renewal stops and its reservations expire within two minutes.
+Ctrl-C/Escape aborts usage work and all-limited recovery waits. Concurrent foreground streams may share one eligible account, but each has its own lease token: completion, cancellation, renewal loss, and release affect only that stream. If a process is killed ungracefully, renewal stops; its foreground lease still fences priming until it expires within two minutes, but it does not prevent another foreground selection. Recovery waits likewise ignore foreground leases and wait only on recoverable blocks or live account primer leases.
 
 ## Installation problems
 
@@ -75,6 +75,10 @@ pi --list-models openai-codex
 ```
 
 All normal Codex model ids should appear. The release smoke test installs an exact pushed commit through this GitHub path in an isolated `PI_CODING_AGENT_DIR`.
+
+When updating or rolling back, coordinate all Pi processes that share the profile and restart them together. Mixed versions still agree that primer leases are exclusive, but older controllers also treat foreground leases as exclusive while current controllers treat them as advisory; until the coordinated restart finishes, this asymmetry can change which foreground account an older process selects.
+
+Do not treat the package's injected-stream tests as approval for production accounts. Production rollout remains blocked until a released Pi commit partitions Codex WebSocket connections, continuation state, and transport-fallback state by account identity as well as session; Pi 0.80.6 does not provide that boundary.
 
 ## Safe resets
 
