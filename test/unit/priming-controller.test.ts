@@ -237,6 +237,66 @@ describe("PrimingController", () => {
     expect((await store.read()).reservations).toHaveLength(0);
   });
 
+  test("keeps primer acquisition fenced until every foreground token releases", async () => {
+    const { controller, store, requests, usageReads } = await setup({ authorized: true });
+    const reservations = createReservationStore(store);
+    await store.update((state) => ({
+      ...state,
+      reservations: [
+        {
+          accountId: "a",
+          leaseToken: "foreground-one",
+          owner: { processId: 2, sessionId: "peer-one", requestId: "request-one" },
+          createdAt: NOW,
+          expiresAt: NOW + 60_000,
+          kind: "foreground",
+        },
+        {
+          accountId: "a",
+          leaseToken: "foreground-two",
+          owner: { processId: 3, sessionId: "peer-two", requestId: "request-two" },
+          createdAt: NOW,
+          expiresAt: NOW + 60_000,
+          kind: "foreground",
+        },
+      ],
+    }));
+
+    expect(await controller.primeAccount("a")).toEqual({ status: "reserved" });
+    expect(usageReads()).toBe(0);
+    expect(requests).toHaveLength(0);
+    await reservations.release("foreground-one");
+    expect(await controller.primeAccount("a")).toEqual({ status: "reserved" });
+    expect(usageReads()).toBe(0);
+    await reservations.release("foreground-two");
+
+    expect(await controller.primeAccount("a")).toEqual({ status: "inconclusive" });
+    expect(requests).toHaveLength(1);
+    expect((await store.read()).reservations).toEqual([]);
+  });
+
+  test("does not acquire a second account primer lease", async () => {
+    const { controller, store, requests, usageReads } = await setup({ authorized: true });
+    await store.update((state) => ({
+      ...state,
+      reservations: [
+        {
+          accountId: "a",
+          leaseToken: "existing-account-primer",
+          owner: { processId: 2, sessionId: "peer-primer", requestId: "peer-primer" },
+          createdAt: NOW,
+          expiresAt: NOW + 60_000,
+          kind: "primer",
+        },
+      ],
+    }));
+
+    expect(await controller.primeAccount("a")).toEqual({ status: "reserved" });
+    expect(usageReads()).toBe(0);
+    expect(requests).toHaveLength(0);
+    expect((await store.read()).reservations).toHaveLength(1);
+  });
+
   test("applies the sweep limit to primer attempts instead of account positions", async () => {
     const { controller, store, requests } = await setup({
       authorized: true,

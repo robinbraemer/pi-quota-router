@@ -10,9 +10,11 @@ import {
 import { OPENAI_CODEX_MODELS } from "@earendil-works/pi-ai/providers/openai-codex.models";
 import { AccountNeedsReauthError } from "../../src/accounts/account-vault.ts";
 import { defaultConfig } from "../../src/config.ts";
+import { createPrimingController } from "../../src/priming/priming-controller.ts";
 import { classifyFailure } from "../../src/recovery/failure-classifier.ts";
 import { waitForRecovery } from "../../src/recovery/wait-for-recovery.ts";
 import { createRouterController } from "../../src/router-controller.ts";
+import { createReservationStore } from "../../src/routing/reservation-store.ts";
 import { createAtomicJsonStore } from "../../src/storage/atomic-json-store.ts";
 import { resolveRouterPaths } from "../../src/storage/paths.ts";
 import {
@@ -141,6 +143,156 @@ describe("quota router end-to-end guarantees", () => {
       await Promise.all([first.shutdown(), second.shutdown()]);
     }
   }, 2_000);
+
+  test("an account primer lease fences a foreground worker across processes", async () => {
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    const stateStore = createAtomicJsonStore<RuntimeStateFile>({
+      path: fixture.file,
+      schema: RuntimeStateFileSchema,
+      createDefault: () => structuredClone(defaultRuntimeState),
+    });
+    await stateStore.update((state) => ({
+      ...state,
+      reservations: [
+        {
+          accountId: "a",
+          leaseToken: "synthetic-cross-process-primer",
+          owner: { processId: 7, sessionId: "primer", requestId: "primer" },
+          createdAt: NOW,
+          expiresAt: NOW + 60_000,
+          kind: "primer",
+        },
+      ],
+    }));
+    const worker = new URL("../helpers/worker-select.ts", import.meta.url).pathname;
+    const select = async (requestId: string, accountIds = "a") => {
+      const child = Bun.spawn(
+        [process.execPath, worker, fixture.file, requestId, accountIds, "false"],
+        {
+          stdout: "pipe",
+          stderr: "pipe",
+        },
+      );
+      const result = Promise.all([
+        child.exited,
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+      ]);
+      try {
+        const [exitCode, stdout, stderr] = await Promise.race([
+          result,
+          Bun.sleep(5_000).then(() => {
+            throw new Error("foreground worker timed out");
+          }),
+        ]);
+        expect(exitCode).toBe(0);
+        expect(stderr).toBe("");
+        return JSON.parse(stdout) as { accountId?: string };
+      } finally {
+        if (child.exitCode === null) child.kill();
+        await child.exited;
+      }
+    };
+
+    expect((await select("primer-blocked", "a,b")).accountId).toBe("b");
+    expect((await stateStore.read()).lastSelection?.candidates[0]?.rejectionCode).toBe(
+      "primer_active",
+    );
+    await stateStore.update((state) => ({ ...state, reservations: [] }));
+    expect((await select("primer-released")).accountId).toBe("a");
+
+    await stateStore.update((state) => ({
+      ...state,
+      reservations: [
+        {
+          accountId: "__primer_sweep__",
+          leaseToken: "synthetic-sweep-only",
+          owner: { processId: 7, sessionId: "sweep", requestId: "sweep" },
+          createdAt: NOW,
+          expiresAt: NOW + 60_000,
+          kind: "primer",
+        },
+      ],
+    }));
+    expect((await select("sweep-does-not-veto")).accountId).toBe("a");
+  });
+
+  test("a held foreground worker fences primer acquisition across processes", async () => {
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    const stateStore = createAtomicJsonStore<RuntimeStateFile>({
+      path: fixture.file,
+      schema: RuntimeStateFileSchema,
+      createDefault: () => structuredClone(defaultRuntimeState),
+    });
+    await stateStore.read();
+    const reservations = createReservationStore(stateStore);
+    let usageCalls = 0;
+    let providerCalls = 0;
+    const primer = createPrimingController({
+      config: () => ({ ...defaultConfig, priming: { ...defaultConfig.priming, enabled: true } }),
+      stateStore,
+      reservations,
+      usage: {
+        get: async () => {
+          usageCalls += 1;
+          return {
+            accountId: "a",
+            observedAt: NOW,
+            shortWindow: { usedPercent: 0, resetsAt: NOW + 18_000_000 },
+            weeklyWindow: { usedPercent: 0 },
+            stale: false,
+          };
+        },
+      },
+      listAccountIds: async () => ["a"],
+      executePrimer: async () => {
+        providerCalls += 1;
+      },
+      clock: () => NOW,
+      owner: { processId: process.pid, sessionId: "test-primer", requestId: "test-primer" },
+      currentModelId: () => "gpt-test",
+      lowestReasoning: () => "minimal",
+    });
+    const worker = new URL("../helpers/worker-select.ts", import.meta.url).pathname;
+    const child = Bun.spawn(
+      [process.execPath, worker, fixture.file, "held-foreground", "a", "true"],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    const reader = child.stdout.getReader();
+    const stderr = new Response(child.stderr).text();
+    try {
+      const line = await Promise.race([
+        readLine(reader),
+        Bun.sleep(5_000).then(() => {
+          throw new Error("held foreground worker timed out");
+        }),
+      ]);
+      const selected = JSON.parse(line) as { leaseToken?: string };
+      expect(await primer.primeAccount("a", { authorization: "one-shot" })).toEqual({
+        status: "reserved",
+      });
+      expect(usageCalls).toBe(0);
+      expect(providerCalls).toBe(0);
+      child.kill();
+      await child.exited;
+      expect(await stderr).toBe("");
+      if (!selected.leaseToken) throw new Error("foreground worker did not return a lease token");
+      await reservations.release(selected.leaseToken);
+      expect(await primer.primeAccount("a", { authorization: "one-shot" })).toEqual({
+        status: "inconclusive",
+      });
+      expect(usageCalls).toBe(2);
+      expect(providerCalls).toBe(1);
+    } finally {
+      if (child.exitCode === null) child.kill();
+      await child.exited;
+      await reader.cancel().catch(() => undefined);
+      await stderr;
+      await primer.shutdown();
+    }
+  });
 
   test("drains the useful quota whose weekly reset is most urgent", async () => {
     const home = await createIsolatedPiHome();
@@ -352,6 +504,18 @@ describe("quota router end-to-end guarantees", () => {
     }
   });
 });
+
+async function readLine(reader: ReadableStreamDefaultReader<Uint8Array>): Promise<string> {
+  const decoder = new TextDecoder();
+  let buffered = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) throw new Error("worker stdout ended before a complete line");
+    buffered += decoder.decode(value, { stream: true });
+    const newline = buffered.indexOf("\n");
+    if (newline >= 0) return buffered.slice(0, newline);
+  }
+}
 
 function usageResponse(options: {
   shortUsed?: number;
