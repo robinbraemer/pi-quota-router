@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type {
+  AssistantMessage,
   AssistantMessageEvent,
   Context,
   Model,
@@ -137,6 +138,54 @@ describe("RoutedStream", () => {
     expect(setup.selected).toEqual(["a"]);
     expect(setup.recorded).toEqual(["a"]);
     expect(setup.succeeded).toEqual([]);
+  });
+
+  test("preserves safe terminal content and usage while sanitizing provider diagnostics", async () => {
+    const secret = "secret-provider-diagnostic";
+    const terminal: AssistantMessage & { rawIdentity: string } = {
+      ...message("error", `usage limit reached ${secret}`),
+      content: [{ type: "text", text: "partial answer" }],
+      responseId: secret,
+      diagnostics: [
+        {
+          type: "provider-error",
+          timestamp: 2,
+          details: { body: secret, authorization: `Bearer ${secret}` },
+        },
+      ],
+      usage: {
+        input: 11,
+        output: 7,
+        cacheRead: 5,
+        cacheWrite: 3,
+        cacheWrite1h: 2,
+        reasoning: 4,
+        totalTokens: 26,
+        cost: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, total: 10 },
+      },
+      rawIdentity: secret,
+    };
+    const setup = dependencies(["a", "b"], () =>
+      eventStream([
+        start(),
+        { type: "text_start", contentIndex: 0, partial: message() },
+        { type: "error", reason: "error", error: terminal },
+      ]),
+    );
+
+    const events = await collect(createRoutedStream(setup.value)(model, context));
+    const error = events.at(-1);
+
+    expect(error?.type).toBe("error");
+    if (error?.type !== "error") throw new Error("expected a terminal error event");
+    expect(error.error.content).toEqual(terminal.content);
+    expect(error.error.usage).toEqual(terminal.usage);
+    expect(error.error.errorMessage).toBe("No Codex account completed the request");
+    expect(error.error.stopReason).toBe("error");
+    expect(error.error.responseId).toBeUndefined();
+    expect(error.error.diagnostics).toBeUndefined();
+    expect(JSON.stringify(error)).not.toContain(secret);
+    expect(setup.selected).toEqual(["a"]);
   });
 
   test("never rotates when an iterator throws after visible output", async () => {

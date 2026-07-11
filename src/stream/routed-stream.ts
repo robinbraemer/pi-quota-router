@@ -192,6 +192,7 @@ export function createRoutedStream(
                       model,
                       event.reason === "aborted" ? "aborted" : "error",
                       classifiedInput,
+                      event.error,
                     ),
                   );
                   return;
@@ -292,14 +293,15 @@ function errorEvent(
   model: Model<"openai-codex-responses">,
   reason: "aborted" | "error",
   error?: unknown,
+  providerMessage?: AssistantMessage,
 ): Extract<AssistantMessageEvent, { type: "error" }> {
   const message: AssistantMessage = {
     role: "assistant",
-    content: [],
+    content: providerMessage?.content ?? [],
     api: model.api,
     provider: model.provider,
     model: model.id,
-    usage: {
+    usage: providerMessage?.usage ?? {
       input: 0,
       output: 0,
       cacheRead: 0,
