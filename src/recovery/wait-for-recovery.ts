@@ -62,7 +62,10 @@ export async function waitForRecovery(options: WaitForRecoveryOptions): Promise<
     ).filter((block) => block.retryAt === undefined || block.retryAt > now);
     const reservations = accountIds
       ? state.reservations.filter(
-          (reservation) => accountIds.has(reservation.accountId) && reservation.expiresAt > now,
+          (reservation) =>
+            reservation.kind === "primer" &&
+            accountIds.has(reservation.accountId) &&
+            reservation.expiresAt > now,
         )
       : [];
     const unavailableAccountIds = new Set([

@@ -75,7 +75,7 @@ export interface Candidate {
   usage?: UsageSnapshot;
   needsReauth: boolean;
   block?: AccountBlock;
-  reservation?: Reservation;
+  primerLease?: Reservation;
   untouched: boolean;
 }
 

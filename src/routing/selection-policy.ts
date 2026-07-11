@@ -201,8 +201,8 @@ function baseHealthRejection(candidate: Candidate, now: number): string | undefi
   if (candidate.block && (candidate.block.retryAt === undefined || candidate.block.retryAt > now)) {
     return "blocked";
   }
-  if (candidate.reservation && candidate.reservation.expiresAt > now) {
-    return "reserved";
+  if (candidate.primerLease && candidate.primerLease.expiresAt > now) {
+    return "primer_active";
   }
   return undefined;
 }

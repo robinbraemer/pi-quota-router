@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { defaultConfig } from "../../src/config.ts";
 import { selectAccount, weeklyUrgency } from "../../src/routing/selection-policy.ts";
+import type { Reservation } from "../../src/types.ts";
 import { candidate, usage } from "../fixtures/candidates.ts";
 
 const NOW = 2_000_000_000_000;
@@ -125,6 +126,86 @@ describe("quota-aware selection", () => {
     });
     expect(unhealthy.accountId).toBeUndefined();
     expect(unhealthy.reason).toBe("manual_account_unavailable");
+  });
+
+  test("rejects a live primer lease in automatic and manual routing", () => {
+    const primerLease: Reservation = {
+      accountId: "forced",
+      leaseToken: "synthetic-primer-lease",
+      owner: {
+        processId: 7,
+        sessionId: "other-session",
+        requestId: "other-request",
+      },
+      createdAt: NOW,
+      expiresAt: NOW + 60_000,
+      kind: "primer",
+    };
+    const automatic = selectAccount({
+      candidates: [{ ...candidate("forced", NOW), primerLease }, candidate("healthy", NOW)],
+      config: defaultConfig,
+      now: NOW,
+    });
+    expect(automatic.accountId).toBe("healthy");
+    expect(automatic.candidates[0]?.rejectionCode).toBe("primer_active");
+
+    const manual = selectAccount({
+      candidates: [{ ...candidate("forced", NOW), primerLease }],
+      config: { ...defaultConfig, manualAccountId: "forced" },
+      now: NOW,
+    });
+    expect(manual.reason).toBe("manual_account_unavailable");
+    expect(manual.candidates[0]?.rejectionCode).toBe("primer_active");
+  });
+
+  test("ignores an expired primer lease", () => {
+    const expiredPrimer: Reservation = {
+      accountId: "expired-primer",
+      leaseToken: "synthetic-expired-primer",
+      owner: { processId: 7, sessionId: "session", requestId: "request" },
+      createdAt: NOW - 120_000,
+      expiresAt: NOW - 1,
+      kind: "primer",
+    };
+    const decision = selectAccount({
+      candidates: [{ ...candidate("expired-primer", NOW), primerLease: expiredPrimer }],
+      config: defaultConfig,
+      now: NOW,
+    });
+    expect(decision.accountId).toBe("expired-primer");
+  });
+
+  test("reports reauthentication and blocks before primer activity", () => {
+    const primerLease: Reservation = {
+      accountId: "a",
+      leaseToken: "synthetic-primer-ordering",
+      owner: { processId: 7, sessionId: "session", requestId: "request" },
+      createdAt: NOW,
+      expiresAt: NOW + 60_000,
+      kind: "primer",
+    };
+    const decision = selectAccount({
+      candidates: [
+        { ...candidate("reauth", NOW), needsReauth: true, primerLease },
+        {
+          ...candidate("blocked", NOW),
+          block: {
+            accountId: "blocked",
+            kind: "quota",
+            blockedAt: NOW,
+            retryAt: NOW + 1,
+            estimated: false,
+          },
+          primerLease,
+        },
+      ],
+      config: defaultConfig,
+      now: NOW,
+    });
+    expect(decision.candidates.map((value) => value.rejectionCode)).toEqual([
+      "needs_reauth",
+      "blocked",
+    ]);
   });
 
   test("retains the current account inside the ten-percent hysteresis band", () => {

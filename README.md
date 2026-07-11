@@ -108,7 +108,7 @@ The confirmations authorize only the current command. They do not change `config
 | `/quota-router path` | Print every router data path. |
 | `/quota-router log [on\|off]` | Show, enable, or disable the bounded diagnostic event log for this Pi session. |
 
-A manual account is selected without first fetching quota usage and bypasses automatic freshness, untouched-clock, and headroom checks. It is still rejected if it needs reauthentication or has an active block/reservation. If labels are duplicated, select the account by its managed id from `list`. Return to `auto` when the exceptional task is finished.
+A manual account is selected without first fetching quota usage and bypasses automatic freshness, untouched-clock, and headroom checks. It is still rejected if it needs reauthentication, has an active block, or has a live account primer lease. Foreground peers do not veto the override. If labels are duplicated, select the account by its managed id from `list`. Return to `auto` when the exceptional task is finished.
 
 ## Footer legend
 

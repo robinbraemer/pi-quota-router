@@ -2,17 +2,16 @@ import { describe, expect, test } from "bun:test";
 import { findSecretLeaks } from "../../scripts/check-secrets.ts";
 
 describe("release secret scanner", () => {
-  test("detects bearer, refresh, API key, and JWT-shaped credentials", () => {
-    const jwt = ["a".repeat(20), "b".repeat(24), "c".repeat(16)].join(".");
+  test("classifies synthetic credentials without echoing their values", () => {
+    const bearer = `Bearer ${"a".repeat(32)}`;
+    const refresh = `rt_${"b".repeat(32)}`;
+    const apiKey = `sk-${"c".repeat(32)}`;
+    const jwt = ["d".repeat(20), "e".repeat(24), "f".repeat(16)].join(".");
+    const credentials = [bearer, refresh, apiKey, jwt];
     const leaks = findSecretLeaks([
       {
         path: "bad.txt",
-        content: [
-          `Bearer ${"a".repeat(32)}`,
-          `"refreshToken": "rt_${"b".repeat(32)}"`,
-          `sk-${"c".repeat(32)}`,
-          jwt,
-        ].join("\n"),
+        content: credentials.join("\n"),
       },
     ]);
 
@@ -22,6 +21,9 @@ describe("release secret scanner", () => {
       "OpenAI API key",
       "JWT",
     ]);
+    expect(
+      credentials.every((credential) => !JSON.stringify(leaks).includes(credential)),
+    ).toBeTrue();
   });
 
   test("allows documentation, templates, and low-entropy synthetic markers", () => {

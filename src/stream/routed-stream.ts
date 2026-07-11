@@ -9,7 +9,14 @@ import {
 } from "@earendil-works/pi-ai";
 import type { FreshCredential } from "../accounts/account-vault.ts";
 import type { FailureClass } from "../recovery/failure-classifier.ts";
-import { startReservationHeartbeat } from "../routing/reservation-heartbeat.ts";
+import {
+  NoRecoverableAccountError,
+  RecoveryWaitTimeoutError,
+} from "../recovery/wait-for-recovery.ts";
+import {
+  ReservationLostError,
+  startReservationHeartbeat,
+} from "../routing/reservation-heartbeat.ts";
 import { ReplayBoundary } from "./replay-boundary.ts";
 import { canRotateBeforeOutput } from "./stream-attempt.ts";
 
@@ -50,7 +57,7 @@ export interface RoutedStreamDependencies {
     rejectedAccessToken: string | undefined,
     failure: FailureClass,
   ): Promise<void>;
-  recordSuccess(accountId: string): void;
+  recordSuccess(accountId: string, sessionId?: string): void;
   release(leaseToken: string): Promise<void>;
   renew(leaseToken: string, ttlMs: number): Promise<boolean>;
   recoveryDeadline(): number;
@@ -180,7 +187,14 @@ export function createRoutedStream(
                   if (pendingStart) {
                     output.push(pendingStart);
                   }
-                  output.push(event);
+                  output.push(
+                    errorEvent(
+                      model,
+                      event.reason === "aborted" ? "aborted" : "error",
+                      classifiedInput,
+                      event.error,
+                    ),
+                  );
                   return;
                 }
 
@@ -189,7 +203,7 @@ export function createRoutedStream(
                   pendingStart = undefined;
                 }
                 if (event.type === "done") {
-                  dependencies.recordSuccess(lease.accountId);
+                  dependencies.recordSuccess(lease.accountId, options?.sessionId);
                   await heartbeat.stop();
                   await release();
                   output.push(event);
@@ -279,14 +293,15 @@ function errorEvent(
   model: Model<"openai-codex-responses">,
   reason: "aborted" | "error",
   error?: unknown,
+  providerMessage?: AssistantMessage,
 ): Extract<AssistantMessageEvent, { type: "error" }> {
   const message: AssistantMessage = {
     role: "assistant",
-    content: [],
+    content: providerMessage?.content ?? [],
     api: model.api,
     provider: model.provider,
     model: model.id,
-    usage: {
+    usage: providerMessage?.usage ?? {
       input: 0,
       output: 0,
       cacheRead: 0,
@@ -295,8 +310,24 @@ function errorEvent(
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
     },
     stopReason: reason,
-    errorMessage: error instanceof Error ? error.message : "No Codex account completed the request",
+    errorMessage: sanitizedErrorMessage(reason, error),
     timestamp: Date.now(),
   };
   return { type: "error", reason, error: message };
+}
+
+function sanitizedErrorMessage(reason: "aborted" | "error", error: unknown): string {
+  if (reason === "aborted") {
+    return error instanceof Error && error.message === "SIGINT"
+      ? error.message
+      : "The Codex request was cancelled";
+  }
+  if (
+    error instanceof ReservationLostError ||
+    error instanceof RecoveryWaitTimeoutError ||
+    error instanceof NoRecoverableAccountError
+  ) {
+    return error.message;
+  }
+  return "No Codex account completed the request";
 }

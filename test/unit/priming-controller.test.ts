@@ -4,6 +4,7 @@ import {
   createPrimingController,
   type PrimerRequest,
 } from "../../src/priming/priming-controller.ts";
+import { startReservationHeartbeat } from "../../src/routing/reservation-heartbeat.ts";
 import {
   createReservationStore,
   type ReservationStore,
@@ -235,6 +236,143 @@ describe("PrimingController", () => {
     expect(await controller.primeAccount("a")).toEqual({ status: "reserved" });
     expect(requests).toHaveLength(0);
     expect((await store.read()).reservations).toHaveLength(0);
+  });
+
+  test("keeps primer acquisition fenced until every foreground token releases", async () => {
+    const { controller, store, requests, usageReads } = await setup({ authorized: true });
+    const reservations = createReservationStore(store);
+    await store.update((state) => ({
+      ...state,
+      reservations: [
+        {
+          accountId: "a",
+          leaseToken: "foreground-one",
+          owner: { processId: 2, sessionId: "peer-one", requestId: "request-one" },
+          createdAt: NOW,
+          expiresAt: NOW + 60_000,
+          kind: "foreground",
+        },
+        {
+          accountId: "a",
+          leaseToken: "foreground-two",
+          owner: { processId: 3, sessionId: "peer-two", requestId: "request-two" },
+          createdAt: NOW,
+          expiresAt: NOW + 60_000,
+          kind: "foreground",
+        },
+      ],
+    }));
+
+    expect(await controller.primeAccount("a")).toEqual({ status: "reserved" });
+    expect(usageReads()).toBe(0);
+    expect(requests).toHaveLength(0);
+    await reservations.release("foreground-one");
+    expect(await controller.primeAccount("a")).toEqual({ status: "reserved" });
+    expect(usageReads()).toBe(0);
+    await reservations.release("foreground-two");
+
+    expect(await controller.primeAccount("a")).toEqual({ status: "inconclusive" });
+    expect(requests).toHaveLength(1);
+    expect((await store.read()).reservations).toEqual([]);
+  });
+
+  test("does not acquire a second account primer lease", async () => {
+    const { controller, store, requests, usageReads } = await setup({ authorized: true });
+    await store.update((state) => ({
+      ...state,
+      reservations: [
+        {
+          accountId: "a",
+          leaseToken: "existing-account-primer",
+          owner: { processId: 2, sessionId: "peer-primer", requestId: "peer-primer" },
+          createdAt: NOW,
+          expiresAt: NOW + 60_000,
+          kind: "primer",
+        },
+      ],
+    }));
+
+    expect(await controller.primeAccount("a")).toEqual({ status: "reserved" });
+    expect(usageReads()).toBe(0);
+    expect(requests).toHaveLength(0);
+    expect((await store.read()).reservations).toHaveLength(1);
+  });
+
+  test("keeps primer fenced by a peer after another foreground heartbeat is lost", async () => {
+    const { controller, store, requests, usageReads } = await setup({ authorized: true });
+    const reservations = createReservationStore(store);
+    await store.update((state) => ({
+      ...state,
+      reservations: [
+        {
+          accountId: "a",
+          leaseToken: "lost-heartbeat-token",
+          owner: { processId: 2, sessionId: "lost", requestId: "lost" },
+          createdAt: NOW,
+          expiresAt: NOW + 60_000,
+          kind: "foreground",
+        },
+        {
+          accountId: "a",
+          leaseToken: "live-peer-token",
+          owner: { processId: 3, sessionId: "peer", requestId: "peer" },
+          createdAt: NOW,
+          expiresAt: NOW + 60_000,
+          kind: "foreground",
+        },
+      ],
+    }));
+    const heartbeat = startReservationHeartbeat({
+      leaseToken: "lost-heartbeat-token",
+      ttlMs: 3,
+      renew: async () => false,
+    });
+    try {
+      if (!heartbeat.signal.aborted) {
+        await new Promise<void>((resolve) => {
+          heartbeat.signal.addEventListener("abort", () => resolve(), { once: true });
+        });
+      }
+      await reservations.release("lost-heartbeat-token");
+
+      expect((await store.read()).reservations.map((value) => value.leaseToken)).toEqual([
+        "live-peer-token",
+      ]);
+      expect(await controller.primeAccount("a")).toEqual({ status: "reserved" });
+      expect(usageReads()).toBe(0);
+      expect(requests).toHaveLength(0);
+    } finally {
+      await heartbeat.stop();
+    }
+  });
+
+  test("keeps a crashed foreground fence until expiry without consulting its pid", async () => {
+    let now = NOW;
+    const { controller, store, requests, usageReads } = await setup({
+      authorized: true,
+      clock: () => now,
+    });
+    await store.update((state) => ({
+      ...state,
+      reservations: [
+        {
+          accountId: "a",
+          leaseToken: "crashed-foreground",
+          owner: { processId: 999_999, sessionId: "crashed", requestId: "crashed" },
+          createdAt: NOW,
+          expiresAt: NOW + 100,
+          kind: "foreground",
+        },
+      ],
+    }));
+
+    expect(await controller.primeAccount("a")).toEqual({ status: "reserved" });
+    expect(usageReads()).toBe(0);
+    expect(requests).toHaveLength(0);
+    now = NOW + 101;
+    expect(await controller.primeAccount("a")).toEqual({ status: "inconclusive" });
+    expect(requests).toHaveLength(1);
+    expect((await store.read()).reservations).toEqual([]);
   });
 
   test("applies the sweep limit to primer attempts instead of account positions", async () => {
