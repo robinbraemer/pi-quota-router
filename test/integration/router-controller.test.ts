@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { chmod } from "node:fs/promises";
-import type { AssistantMessageEvent, Context, Model } from "@earendil-works/pi-ai";
+import type {
+  AssistantMessageEvent,
+  Context,
+  Model,
+  SimpleStreamOptions,
+} from "@earendil-works/pi-ai";
 import { OPENAI_CODEX_MODELS } from "@earendil-works/pi-ai/providers/openai-codex.models";
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { deriveManagedAccountId } from "../../src/accounts/account-identity.ts";
@@ -22,6 +27,7 @@ import { eventStream, message, successfulText } from "../fixtures/provider-strea
 import { createStorageFixture } from "../fixtures/storage.ts";
 import { completeUsageResponse } from "../fixtures/usage-responses.ts";
 
+const AUTHORIZATION_URL = `https://auth.openai.com/oauth/authorize?response_type=code&client_id=app_EMoamEEZ73f0CkXaXp7hrann&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback&code_challenge=${"a".repeat(43)}&code_challenge_method=S256&state=oauth-state`;
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => Promise.all(cleanups.splice(0).map((cleanup) => cleanup())));
 
@@ -91,7 +97,15 @@ describe("RouterController", () => {
 
     await controller.operations.refresh(accountId);
 
-    expect((await stateStore.read()).blocks).toEqual([]);
+    expect((await stateStore.read()).blocks).toEqual([
+      {
+        accountId,
+        kind: "transient",
+        blockedAt: 2_000_000_000_000,
+        retryAt: 2_000_003_600_000,
+        estimated: true,
+      },
+    ]);
     await controller.shutdown();
   });
 
@@ -172,7 +186,11 @@ describe("RouterController", () => {
       clock: () => 2_000_000_000_000,
       oauth: { refresh: async () => relogged },
       fetchImpl: async () => Response.json(completeUsageResponse),
-      baseStream: (() => {
+      baseStream: (...args: Parameters<RouterControllerOptions["baseStream"]>) => {
+        const streamOptions = args[2];
+        if (streamOptions?.apiKey === relogged.access) {
+          return eventStream(successfulText());
+        }
         const stream = (async function* () {
           markAttemptStarted?.();
           await attemptHeld;
@@ -182,8 +200,8 @@ describe("RouterController", () => {
             error: message("error", "invalid_grant"),
           } as AssistantMessageEvent;
         })();
-        return stream;
-      }) as unknown as RouterControllerOptions["baseStream"],
+        return stream as unknown as ReturnType<RouterControllerOptions["baseStream"]>;
+      },
     });
     const accountId = await controller.vault.addFromOAuth("work", rejected);
     const request = collectController(controller);
@@ -413,6 +431,11 @@ describe("RouterController", () => {
     expect(backendKey).not.toBe("pending-login");
     expect(backendKey).toContain(".");
     expect(await controller.operations.status()).toContain("work");
+    const list = await controller.operations.list();
+    expect(list).toContain("work");
+    expect(list).toContain("5h 88% remaining");
+    expect(list).toContain("7d 63% remaining");
+    expect(await controller.operations.dashboard()).toContain("work");
     expect(await controller.operations.verify()).toContain("healthy");
     expect(await controller.operations.paths()).toContain("accounts.json");
     await controller.shutdown();
@@ -456,6 +479,70 @@ describe("RouterController", () => {
     expect(events.at(-1)?.type).toBe("done");
     expect(keys).toEqual([original.access, refreshed.access]);
     expect(refreshes).toBe(1);
+    await controller.shutdown();
+  });
+
+  test("force refreshes a usage 401 before routing", async () => {
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    const original = makeCredentials("account-1", 3_000_000_000_000, "original");
+    const refreshed = makeCredentials("account-1", 3_000_000_000_000, "refreshed");
+    const usageKeys: string[] = [];
+    let refreshes = 0;
+    const controller = await createRouterController({
+      paths: resolveRouterPaths(fixture.directory),
+      clock: () => 2_000_000_000_000,
+      oauth: {
+        refresh: async () => {
+          refreshes += 1;
+          return refreshed;
+        },
+      },
+      fetchImpl: async (_input, init) => {
+        const authorization = new Headers(init?.headers).get("Authorization") ?? "";
+        usageKeys.push(authorization);
+        return authorization === `Bearer ${original.access}`
+          ? new Response(null, { status: 401 })
+          : Response.json(completeUsageResponse);
+      },
+      baseStream: () => eventStream(successfulText()),
+    });
+    await controller.vault.addFromOAuth("work", original);
+
+    const events = await collectController(controller);
+
+    expect(events.at(-1)?.type).toBe("done");
+    expect(usageKeys).toEqual([`Bearer ${original.access}`, `Bearer ${refreshed.access}`]);
+    expect(refreshes).toBe(1);
+    await controller.shutdown();
+  });
+
+  test("propagates caller aborts during usage collection", async () => {
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    const cancellation = new AbortController();
+    const controller = await createRouterController({
+      paths: resolveRouterPaths(fixture.directory),
+      clock: () => 2_000_000_000_000,
+      oauth: { refresh: async () => makeCredentials("account-1", 3_000_000_000_000) },
+      fetchImpl: async (_input, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), {
+            once: true,
+          });
+          cancellation.abort(new Error("SIGINT"));
+        }),
+      baseStream: () => eventStream(successfulText()),
+    });
+    await controller.vault.addFromOAuth("work", makeCredentials("account-1", 3_000_000_000_000));
+
+    const events = await collectController(controller, { signal: cancellation.signal });
+
+    expect(events).toHaveLength(1);
+    expect(events[0]?.type).toBe("error");
+    if (events[0]?.type === "error") {
+      expect(events[0].error.errorMessage).toBe("SIGINT");
+    }
     await controller.shutdown();
   });
 
@@ -516,6 +603,66 @@ describe("RouterController", () => {
     await controller.shutdown();
   });
 
+  test("records fresh exhausted usage as a recoverable quota block", async () => {
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    const paths = resolveRouterPaths(fixture.directory);
+    const now = 2_000_000_000_000;
+    const resetAt = now + 600_000;
+    let streamCalls = 0;
+    const controller = await createRouterController({
+      paths,
+      clock: () => now,
+      oauth: { refresh: async () => makeCredentials("account-1", 3_000_000_000_000) },
+      fetchImpl: async () =>
+        Response.json({
+          ...completeUsageResponse,
+          rate_limit: {
+            ...completeUsageResponse.rate_limit,
+            primary_window: {
+              ...completeUsageResponse.rate_limit.primary_window,
+              used_percent: 100,
+              reset_at: resetAt,
+            },
+          },
+        }),
+      baseStream: () => {
+        streamCalls += 1;
+        return eventStream(successfulText());
+      },
+    });
+    await controller.vault.addFromOAuth("work", makeCredentials("account-1", 3_000_000_000_000));
+    const stateStore = createAtomicJsonStore<RuntimeStateFile>({
+      path: paths.state,
+      schema: RuntimeStateFileSchema,
+      createDefault: () => structuredClone(defaultRuntimeState),
+    });
+    const cancellation = new AbortController();
+    const routed = collectController(controller, { signal: cancellation.signal });
+
+    let block = (await stateStore.read()).blocks[0];
+    for (let attempt = 0; attempt < 50 && !block; attempt += 1) {
+      await Bun.sleep(2);
+      block = (await stateStore.read()).blocks[0];
+    }
+    cancellation.abort(new Error("stop recovery wait"));
+    const events = await routed;
+
+    expect(block).toEqual({
+      accountId: expect.any(String),
+      kind: "quota",
+      blockedAt: now,
+      retryAt: resetAt,
+      estimated: false,
+    });
+    expect(streamCalls).toBe(0);
+    expect(events[0]?.type).toBe("error");
+    if (events[0]?.type === "error") {
+      expect(events[0].reason).toBe("aborted");
+    }
+    await controller.shutdown();
+  });
+
   test("uses live usage freshness and rotation configuration", async () => {
     const fixture = await createStorageFixture();
     cleanups.push(fixture.cleanup);
@@ -559,6 +706,39 @@ describe("RouterController", () => {
     await controller.shutdown();
   });
 
+  test("routes a manual account without fetching usage", async () => {
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    let usageCalls = 0;
+    let routedAccessToken: string | undefined;
+    const manualCredentials = makeCredentials("account-2", 3_000_000_000_000, "manual");
+    const controller = await createRouterController({
+      paths: resolveRouterPaths(fixture.directory),
+      clock: () => 2_000_000_000_000,
+      oauth: { refresh: async () => manualCredentials },
+      fetchImpl: async () => {
+        usageCalls += 1;
+        throw new Error("usage endpoint unavailable");
+      },
+      baseStream: (_model, _context, options) => {
+        routedAccessToken = options?.apiKey;
+        return eventStream(successfulText());
+      },
+    });
+    await controller.vault.addFromOAuth(
+      "unrelated",
+      makeCredentials("account-1", 3_000_000_000_000, "unrelated"),
+    );
+    const manualAccountId = await controller.vault.addFromOAuth("manual", manualCredentials);
+    await controller.operations.use(manualAccountId);
+
+    await collectController(controller);
+
+    expect(usageCalls).toBe(0);
+    expect(routedAccessToken).toBe(manualCredentials.access);
+    await controller.shutdown();
+  });
+
   test("uses the configured maximum rotation attempts", async () => {
     const fixture = await createStorageFixture();
     cleanups.push(fixture.cleanup);
@@ -590,6 +770,110 @@ describe("RouterController", () => {
     await collectController(controller);
 
     expect(streamCalls).toBe(1);
+    await controller.shutdown();
+  });
+
+  test("primes at most one account without enabling automatic priming", async () => {
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    const paths = resolveRouterPaths(fixture.directory);
+    const usageCalls = new Map<string, number>();
+    let primerCalls = 0;
+    const controller = await createRouterController({
+      paths,
+      clock: () => 2_000_000_000_000,
+      oauth: { refresh: async () => makeCredentials("account-1", 3_000_000_000_000) },
+      fetchImpl: async (_input, init) => {
+        const accountId = new Headers(init?.headers).get("ChatGPT-Account-Id") ?? "unknown";
+        const calls = (usageCalls.get(accountId) ?? 0) + 1;
+        usageCalls.set(accountId, calls);
+        return Response.json({
+          rate_limit: {
+            primary_window: { used_percent: 0, reset_at: 2_000_018_000 },
+            secondary_window: {
+              used_percent: 0,
+              ...(calls > 1 ? { reset_at: 2_000_604_800 } : {}),
+            },
+          },
+        });
+      },
+      baseStream: () => {
+        primerCalls += 1;
+        return eventStream(successfulText());
+      },
+    });
+    await controller.vault.addFromOAuth("first", makeCredentials("account-1", 3_000_000_000_000));
+    await controller.vault.addFromOAuth("second", makeCredentials("account-2", 3_000_000_000_000));
+    const configStore = createAtomicJsonStore<RouterConfig>({
+      path: paths.config,
+      schema: RouterConfigSchema,
+      createDefault: () => {
+        throw new Error("config should already exist");
+      },
+    });
+
+    const model = Object.values(OPENAI_CODEX_MODELS)[0] as Model<"openai-codex-responses">;
+    const result = await controller.operations.prime("all", model.id);
+    const config = await configStore.read();
+
+    expect(result).toContain("first: confirmed");
+    expect(primerCalls).toBe(1);
+    expect(usageCalls.has("account-2")).toBe(false);
+    expect(config.priming.enabled).toBe(false);
+    expect(config.priming.confirmedFirstUseRollingWindow).toBe(false);
+    await controller.shutdown();
+  });
+
+  test("rejects ambiguous labels for use, refresh, and one-shot prime", async () => {
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    let usageCalls = 0;
+    let primerCalls = 0;
+    const controller = await createRouterController({
+      paths: resolveRouterPaths(fixture.directory),
+      clock: () => 2_000_000_000_000,
+      oauth: { refresh: async () => makeCredentials("account-1", 3_000_000_000_000) },
+      fetchImpl: async () => {
+        usageCalls += 1;
+        return Response.json(completeUsageResponse);
+      },
+      baseStream: () => {
+        primerCalls += 1;
+        return eventStream(successfulText());
+      },
+    });
+    await controller.vault.addFromOAuth(
+      "duplicate",
+      makeCredentials("account-1", 3_000_000_000_000),
+    );
+    await controller.vault.addFromOAuth(
+      "duplicate",
+      makeCredentials("account-2", 3_000_000_000_000),
+    );
+
+    const outcomes: string[] = [];
+    for (const operation of [
+      () => controller.operations.use("duplicate"),
+      () => controller.operations.refresh("duplicate"),
+      () => controller.operations.prime("duplicate"),
+    ]) {
+      try {
+        await operation();
+        outcomes.push("resolved");
+      } catch (error) {
+        outcomes.push(error instanceof Error ? error.message : String(error));
+      }
+    }
+
+    expect(outcomes).toEqual(
+      Array.from(
+        { length: 3 },
+        () =>
+          "Ambiguous Codex account label: duplicate. Use a managed account id: codex-07e998012c11, codex-703039e88185",
+      ),
+    );
+    expect(usageCalls).toBe(0);
+    expect(primerCalls).toBe(0);
     await controller.shutdown();
   });
 
@@ -644,21 +928,25 @@ describe("RouterController", () => {
     await controller.shutdown();
   });
 
-  test("waits for recovery after the final candidate fails before output", async () => {
+  test("waits for recovery after every account fails in one request", async () => {
     const fixture = await createStorageFixture();
     cleanups.push(fixture.cleanup);
     const paths = resolveRouterPaths(fixture.directory);
+    let streamCalls = 0;
     const controller = await createRouterController({
       paths,
       clock: () => 2_000_000_000_000,
       oauth: { refresh: async () => makeCredentials("account-1", 3_000_000_000_000) },
       fetchImpl: async () => Response.json(completeUsageResponse),
-      baseStream: () =>
-        eventStream([
+      baseStream: () => {
+        streamCalls += 1;
+        return eventStream([
           { type: "error", reason: "error", error: message("error", "usage limit reached") },
-        ]),
+        ]);
+      },
     });
-    await controller.vault.addFromOAuth("work", makeCredentials("account-1", 3_000_000_000_000));
+    await controller.vault.addFromOAuth("first", makeCredentials("account-1", 3_000_000_000_000));
+    await controller.vault.addFromOAuth("second", makeCredentials("account-2", 3_000_000_000_000));
     const configStore = createAtomicJsonStore<RouterConfig>({
       path: paths.config,
       schema: RouterConfigSchema,
@@ -668,12 +956,13 @@ describe("RouterController", () => {
     });
     await configStore.update((config) => ({
       ...config,
-      maxRotationAttempts: 2,
       maxRecoveryWaitMs: 0,
+      maxRotationAttempts: 3,
     }));
 
     const events = await collectController(controller);
 
+    expect(streamCalls).toBe(2);
     expect(events[0]?.type).toBe("error");
     if (events[0]?.type === "error") {
       expect(events[0].error.errorMessage).toContain("configured wait limit");
@@ -726,6 +1015,234 @@ describe("RouterController", () => {
     await router.shutdown();
   });
 
+  test("clears an account auth block after successful reauthentication", async () => {
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    const paths = resolveRouterPaths(fixture.directory);
+    const credentials = makeCredentials("account-1", 3_000_000_000_000);
+    const controller = await createRouterController({
+      paths,
+      clock: () => 2_000_000_000_000,
+      oauth: { refresh: async () => credentials },
+      login: async (callbacks) => {
+        callbacks.onAuth({ url: AUTHORIZATION_URL });
+        return credentials;
+      },
+      fetchImpl: async () => Response.json(completeUsageResponse),
+      baseStream: () => eventStream(successfulText()),
+    });
+    const accountId = await controller.vault.addFromOAuth("work", credentials);
+    const stateStore = createAtomicJsonStore<RuntimeStateFile>({
+      path: paths.state,
+      schema: RuntimeStateFileSchema,
+      createDefault: () => structuredClone(defaultRuntimeState),
+    });
+    await stateStore.update((state) => ({
+      ...state,
+      blocks: [
+        {
+          accountId,
+          kind: "auth",
+          blockedAt: 2_000_000_000_000,
+          estimated: false,
+        },
+      ],
+    }));
+
+    await controller.operations.login("work", {
+      ui: {
+        notify: () => undefined,
+        select: async () => "Show authorization URL for manual use",
+        input: async () => "manual-code",
+      },
+    } as never);
+
+    expect((await stateStore.read()).blocks).toEqual([]);
+    await controller.shutdown();
+  });
+
+  test("updates the active label after successful reauthentication", async () => {
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    const paths = resolveRouterPaths(fixture.directory);
+    const credentials = makeCredentials("account-1", 3_000_000_000_000);
+    const controller = await createRouterController({
+      paths,
+      clock: () => 2_000_000_000_000,
+      oauth: { refresh: async () => credentials },
+      login: async () => credentials,
+      fetchImpl: async () => Response.json(completeUsageResponse),
+      baseStream: () => eventStream(successfulText()),
+    });
+    await controller.vault.addFromOAuth("old", credentials);
+    await collectController(controller);
+
+    await controller.operations.login("new", {
+      ui: {
+        notify: () => undefined,
+        select: async () => "Show authorization URL for manual use",
+        input: async () => "manual-code",
+      },
+    } as never);
+
+    expect(await controller.operations.status()).toContain("new");
+    await controller.shutdown();
+  });
+
+  test("restores a manual account label after restart", async () => {
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    const options = {
+      paths: resolveRouterPaths(fixture.directory),
+      clock: () => 2_000_000_000_000,
+      oauth: { refresh: async () => makeCredentials("account-1", 3_000_000_000_000) },
+      fetchImpl: async () => Response.json(completeUsageResponse),
+      baseStream: () => eventStream(successfulText()),
+    };
+    const first = await createRouterController(options);
+    const accountId = await first.vault.addFromOAuth(
+      "work",
+      makeCredentials("account-1", 3_000_000_000_000),
+    );
+    await first.operations.use(accountId);
+    await first.shutdown();
+
+    const second = await createRouterController(options);
+
+    expect(await second.operations.status()).toBe("Codex · work · manual");
+    await second.shutdown();
+  });
+
+  test("restores the persisted selected account label after restart", async () => {
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    const options = {
+      paths: resolveRouterPaths(fixture.directory),
+      clock: () => 2_000_000_000_000,
+      oauth: { refresh: async () => makeCredentials("account-1", 3_000_000_000_000) },
+      fetchImpl: async () => Response.json(completeUsageResponse),
+      baseStream: () => eventStream(successfulText()),
+    };
+    const first = await createRouterController(options);
+    await first.vault.addFromOAuth("work", makeCredentials("account-1", 3_000_000_000_000));
+    await collectController(first);
+    await first.shutdown();
+
+    const second = await createRouterController(options);
+
+    expect(await second.operations.status()).toContain("Codex · work ·");
+    expect(await second.operations.status()).toEndWith("· auto");
+    await second.shutdown();
+  });
+
+  test("reports automatic routing after restart when the vault has accounts", async () => {
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    const options = {
+      paths: resolveRouterPaths(fixture.directory),
+      clock: () => 2_000_000_000_000,
+      oauth: { refresh: async () => makeCredentials("account-1", 3_000_000_000_000) },
+      fetchImpl: async () => Response.json(completeUsageResponse),
+      baseStream: () => eventStream(successfulText()),
+    };
+    const first = await createRouterController(options);
+    await first.vault.addFromOAuth("work", makeCredentials("account-1", 3_000_000_000_000));
+    await first.shutdown();
+
+    const second = await createRouterController(options);
+
+    expect(await second.operations.status()).toBe("Codex · work · auto");
+    await second.shutdown();
+  });
+
+  test("reports login after restart when manual configuration outlives the vault account", async () => {
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    const options = {
+      paths: resolveRouterPaths(fixture.directory),
+      clock: () => 2_000_000_000_000,
+      oauth: { refresh: async () => makeCredentials("account-1", 3_000_000_000_000) },
+      fetchImpl: async () => Response.json(completeUsageResponse),
+      baseStream: () => eventStream(successfulText()),
+    };
+    const first = await createRouterController(options);
+    const accountId = await first.vault.addFromOAuth(
+      "work",
+      makeCredentials("account-1", 3_000_000_000_000),
+    );
+    await first.operations.use(accountId);
+    await first.vault.remove(accountId);
+    await first.shutdown();
+
+    const second = await createRouterController(options);
+
+    expect(await second.operations.status()).toBe("Codex · none · login");
+    await second.shutdown();
+  });
+
+  test("persists usage for restart fallback and reconciles estimated blocks", async () => {
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    const paths = resolveRouterPaths(fixture.directory);
+    let now = 2_000_000_000_000;
+    let usageCalls = 0;
+    let usageOffline = false;
+    const options = {
+      paths,
+      clock: () => now,
+      oauth: { refresh: async () => makeCredentials("account-1", 3_000_000_000_000) },
+      fetchImpl: async () => {
+        usageCalls += 1;
+        if (usageOffline) {
+          throw new Error("offline");
+        }
+        return Response.json(completeUsageResponse);
+      },
+      baseStream: () => eventStream(successfulText()),
+    };
+    const first = await createRouterController(options);
+    const accountId = await first.vault.addFromOAuth(
+      "work",
+      makeCredentials("account-1", 3_000_000_000_000),
+    );
+    const stateStore = createAtomicJsonStore<RuntimeStateFile>({
+      path: paths.state,
+      schema: RuntimeStateFileSchema,
+      createDefault: () => structuredClone(defaultRuntimeState),
+    });
+    await stateStore.update((state) => ({
+      ...state,
+      blocks: [
+        {
+          accountId,
+          kind: "quota",
+          blockedAt: now,
+          retryAt: now + 3_600_000,
+          estimated: true,
+        },
+      ],
+    }));
+
+    now += 1;
+    await first.operations.refresh();
+    const persisted = await stateStore.read();
+    expect(persisted.usageSnapshots).toHaveLength(1);
+    expect(persisted.blocks).toEqual([]);
+    await first.shutdown();
+
+    now += 60_000;
+    const second = await createRouterController(options);
+    expect(await second.operations.list()).toContain("5h 88% remaining");
+    await collectController(second);
+    expect(usageCalls).toBe(1);
+    now += 300_001;
+    usageOffline = true;
+    expect((await collectController(second)).at(-1)?.type).toBe("done");
+    expect(usageCalls).toBe(2);
+    expect((await stateStore.read()).usageSnapshots[0]?.observedAt).toBe(2_000_000_000_001);
+    await second.shutdown();
+  });
+
   test("reports unsafe persisted file modes as invalid", async () => {
     const fixture = await createStorageFixture();
     cleanups.push(fixture.cleanup);
@@ -749,10 +1266,13 @@ describe("RouterController", () => {
   });
 });
 
-async function collectController(controller: Awaited<ReturnType<typeof createRouterController>>) {
+async function collectController(
+  controller: Awaited<ReturnType<typeof createRouterController>>,
+  options?: SimpleStreamOptions,
+) {
   const model = Object.values(OPENAI_CODEX_MODELS)[0] as Model<"openai-codex-responses">;
   const events: AssistantMessageEvent[] = [];
-  for await (const event of controller.routedStream(model, { messages: [] } as Context)) {
+  for await (const event of controller.routedStream(model, { messages: [] } as Context, options)) {
     events.push(event);
   }
   return events;

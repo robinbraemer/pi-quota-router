@@ -30,6 +30,10 @@ describe("quota-router command parser", () => {
     });
   });
 
+  test("recognizes list as a first-class managed-account command", () => {
+    expect(parseQuotaRouterCommand("list")).toEqual({ command: "list", args: [] });
+  });
+
   test("rejects unknown commands, unclosed quotes, and invalid account selectors", () => {
     expect(() => parseQuotaRouterCommand("wat")).toThrow(CommandParseError);
     expect(() => parseQuotaRouterCommand('login "work')).toThrow(CommandParseError);

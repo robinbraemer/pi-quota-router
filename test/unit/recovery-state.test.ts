@@ -47,4 +47,18 @@ describe("recovery state", () => {
     );
     expect(longer?.retryAt).toBe(NOW + 10_800_000);
   });
+
+  test("fresh usage preserves estimated transient and auth cooldowns", () => {
+    const usage = exhausted();
+    const transient = blockFromFailure(
+      "a",
+      { kind: "transient", retryAt: NOW + 60_000 },
+      undefined,
+      NOW,
+    );
+    const auth = blockFromFailure("a", { kind: "auth-retry" }, undefined, NOW);
+
+    expect(reconcileUsageBlock(transient, usage, NOW)).toEqual(transient);
+    expect(reconcileUsageBlock(auth, usage, NOW)).toEqual(auth);
+  });
 });

@@ -33,17 +33,17 @@ export interface ManagedCodexAccount {
 
 export interface UsageWindow {
   usedPercent: number;
-  resetsAt?: number;
+  resetsAt?: number | undefined;
 }
 
 export interface UsageSnapshot {
   accountId: string;
   observedAt: number;
   shortWindow: UsageWindow;
-  weeklyWindow?: UsageWindow;
+  weeklyWindow?: UsageWindow | undefined;
   stale: boolean;
-  planType?: string;
-  creditsRemaining?: number;
+  planType?: string | undefined;
+  creditsRemaining?: number | undefined;
 }
 
 export interface AccountBlock {

@@ -77,6 +77,44 @@ describe("waitForRecovery", () => {
     expect(sleeps).toBe(1);
   });
 
+  test("wakes when any requested account becomes available", async () => {
+    let now = START;
+    const store = await setup(START + 3_600_000);
+    await store.update((state) => ({
+      ...state,
+      blocks: [
+        ...state.blocks,
+        {
+          accountId: "b",
+          kind: "quota",
+          blockedAt: START,
+          retryAt: START + 3_600_000,
+          estimated: true,
+        },
+      ],
+    }));
+    let sleeps = 0;
+
+    await waitForRecovery({
+      stateStore: store,
+      accountIds: ["a", "b"],
+      clock: () => now,
+      sleep: async (milliseconds) => {
+        sleeps += 1;
+        if (sleeps > 1) {
+          throw new Error("waited after an account recovered");
+        }
+        now += milliseconds;
+        await store.update((state) => ({
+          ...state,
+          blocks: state.blocks.filter((block) => block.accountId !== "a"),
+        }));
+      },
+    });
+
+    expect(sleeps).toBe(1);
+  });
+
   test("caps waiting at six hours", async () => {
     let now = START;
     const store = await setup(START + 36_000_000);
@@ -152,6 +190,24 @@ describe("waitForRecovery", () => {
         stateStore: store,
         clock: () => now,
         maxWaitMs: 500,
+        sleep: async (milliseconds) => {
+          now += milliseconds;
+        },
+      }),
+    ).rejects.toBeInstanceOf(RecoveryWaitTimeoutError);
+    expect(now).toBe(START + 500);
+  });
+
+  test("honors an absolute deadline supplied by the routed request", async () => {
+    let now = START + 400;
+    const store = await setup(START + 10_000);
+
+    await expect(
+      waitForRecovery({
+        stateStore: store,
+        clock: () => now,
+        deadline: START + 500,
+        maxWaitMs: 10_000,
         sleep: async (milliseconds) => {
           now += milliseconds;
         },

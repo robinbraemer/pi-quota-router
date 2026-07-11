@@ -53,9 +53,11 @@ export interface RoutedStreamDependencies {
   recordSuccess(accountId: string): void;
   release(leaseToken: string): Promise<void>;
   renew(leaseToken: string, ttlMs: number): Promise<boolean>;
+  recoveryDeadline(): number;
   waitForRecovery(
     accountIds: readonly string[],
     knownAccountIds: readonly string[],
+    deadline: number,
     signal?: AbortSignal,
   ): Promise<void>;
   maxAttempts(): number;
@@ -78,6 +80,7 @@ export function createRoutedStream(
     void (async () => {
       const excludedAccountIds = new Set<string>();
       let lastFailure: unknown;
+      let recoveryDeadline: number | undefined;
 
       for (let attempt = 0; attempt < dependencies.maxAttempts(); ) {
         options?.signal?.throwIfAborted();
@@ -92,9 +95,11 @@ export function createRoutedStream(
             lastFailure = new RouteUnavailableError(selection.reason);
             break;
           }
+          recoveryDeadline ??= dependencies.recoveryDeadline();
           await dependencies.waitForRecovery(
             selection.recoverableAccountIds,
             selection.knownAccountIds,
+            recoveryDeadline,
             options?.signal,
           );
           excludedAccountIds.clear();

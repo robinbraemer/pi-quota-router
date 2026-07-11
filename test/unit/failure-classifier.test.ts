@@ -37,6 +37,24 @@ describe("failure classifier", () => {
     expect(classifyFailure(new Error("bad request"), NOW)).toEqual({ kind: "fatal" });
   });
 
+  test("classifies standard fetch failures and nested transport causes", () => {
+    for (const error of [
+      new TypeError("fetch failed"),
+      Object.assign(new Error("dns lookup failed"), { code: "ENOTFOUND" }),
+      new TypeError("fetch failed", {
+        cause: Object.assign(new Error("connection refused"), { code: "ECONNREFUSED" }),
+      }),
+      new Error("request failed", {
+        cause: Object.assign(new Error("socket closed"), { code: "UND_ERR_SOCKET" }),
+      }),
+    ]) {
+      expect(classifyFailure(error, NOW)).toEqual({
+        kind: "transient",
+        retryAt: NOW + 60_000,
+      });
+    }
+  });
+
   test("classifies sanitized credential errors by their typed names", () => {
     expect(classifyFailure(new AccountNeedsReauthError(), NOW)).toEqual({
       kind: "auth-invalid",

@@ -32,7 +32,7 @@ The router does not merely choose the lowest usage percentage. It:
 - Keep routing deterministic, explainable, observable, abortable, and safe under multiple Pi processes.
 - Recover transparently from pre-output quota, authentication, and token-refresh failures.
 - Provide a coherent `/quota-router` command family and a compact footer.
-- Store credentials and state with atomic writes, explicit permissions, strict schemas, and lock protection.
+- Store credentials and state with atomic writes, explicit permissions, strict versioned schemas, and lock protection.
 
 ## Non-goals
 
@@ -56,7 +56,7 @@ Use as the primary behavioral and architectural reference:
 - Token refresh single-flight.
 - Modular account manager, provider, selection, storage, commands, and footer.
 - Unified command family and account-manager UI.
-- Schema validation and migration discipline.
+- Strict schema validation and explicit versioning.
 
 Do not inherit:
 
@@ -75,7 +75,7 @@ Borrow reliability mechanisms:
 - All-limited wake-up behavior and cancellation semantics.
 - Anti-ping-pong logic, stuck-work guards, and circuit-breaker thinking.
 - Account identity deduplication by stable Codex `accountId`.
-- Usage freshness reconciliation when an estimated cooldown is pessimistic.
+- Usage freshness reconciliation when an estimated quota cooldown is pessimistic.
 - Guarantee-driven regression tests.
 
 Do not inherit:
@@ -161,8 +161,7 @@ The provider override is the only component coupled to Pi's streaming types. Sel
 ### `src/router-controller.ts`
 
 - Orchestrates vault, usage, selection, reservations, priming, and status.
-- Exposes command-friendly methods with structured results.
-- Owns no UI rendering.
+- Exposes command-friendly methods that return formatted command and status text.
 
 ### `src/accounts/account-vault.ts`
 
@@ -180,7 +179,7 @@ The provider override is the only component coupled to Pi's streaming types. Sel
 - Creates files with mode `0600`.
 - Writes a same-directory temporary file, flushes it, and renames it atomically.
 - Serializes writers with `proper-lockfile` and a bounded stale-lock policy.
-- Removes an unfinished temporary file when a write fails without replacing a valid primary.
+- Removes its own temporary file after a failed write without replacing a valid primary.
 
 ### `src/usage/codex-usage.ts`
 
@@ -192,9 +191,11 @@ The provider override is the only component coupled to Pi's streaming types. Sel
 
 ### `src/usage/usage-service.ts`
 
-- Caches snapshots for five minutes.
-- Coalesces concurrent refreshes per account; cancelling one caller does not cancel the shared fetch for other callers.
+- Caches snapshots for five minutes; the service supports injected per-account jitter, while the controller uses none.
+- Coalesces concurrent ordinary refreshes and queues one forced follow-up behind an in-flight request.
 - Keeps a last-good snapshot for 24 hours, clearly marked stale.
+- Refreshes a cached snapshot immediately when a recorded usage-window reset time has elapsed.
+- Hydrates and reconciles the newest persisted snapshot so cache and fallback behavior survive controller restarts.
 - Forces a fresh fetch after every non-aborted primer provider attempt and after quota errors.
 - Limits concurrent upstream usage requests to two.
 
@@ -216,13 +217,13 @@ The provider override is the only component coupled to Pi's streaming types. Sel
 ### `src/priming/priming-controller.ts`
 
 - Finds accounts confirmed as untouched with no weekly reset clock.
-- Accepts either persistent policy authorization for an explicit sweep or ephemeral one-shot authorization for a confirmed command.
-- Waits until Pi is idle and no foreground routed request is active.
+- Accepts the command layer's one-shot authorization for the current invocation.
+- Refuses to start while a foreground routed request is active and aborts if foreground work begins.
 - Reserves one account, sends a minimal no-tool Codex request, then force-refreshes usage even if the provider reports an error.
 - Marks success only when a weekly reset timestamp is observed.
 - Preserves a provider-error result as `failed` even when the usage observation confirms the account.
 - Applies a one-hour retry cooldown after an inconclusive or failed primer only when no weekly reset was observed.
-- Runs sequentially and is abortable on shutdown.
+- Runs sequentially and is abortable on shutdown. Although the controller retains a schema-compatible sweep API, the extension does not schedule background sweeps.
 
 ### `src/stream/routed-stream.ts`
 
@@ -231,13 +232,14 @@ The provider override is the only component coupled to Pi's streaming types. Sel
 - Treats `start` as transport metadata, not model output.
 - Marks replay unsafe only after text, thinking, or tool-call content starts.
 - On a pre-output quota/auth error, blocks the account, releases the lease, and retries another account up to five times.
-- On any post-output error, forwards the error unchanged without rotation.
-- If all accounts are temporarily blocked before output, waits abortably for the earliest recovery for at most six hours.
+- On a classified post-output failure, records the account block and forwards the error unchanged without replaying.
+- If all accounts are temporarily blocked before output, waits abortably for the earliest recovery up to the configured limit (six hours by default).
+- Reuses one absolute recovery deadline across every wait in the routed request and resumes when any recoverable account becomes available.
 
 ### `src/status/status-controller.ts`
 
 - Renders a compact footer with active account, 5-hour remaining, weekly remaining, reset countdown, urgency, and routing mode.
-- Uses cached data immediately; normal selection and explicit refreshes populate the cache.
+- Uses cached data without triggering a usage refresh.
 - Keeps rendering independent from routing success.
 
 ### `src/commands/commands.ts`
@@ -327,9 +329,10 @@ Contains no credentials:
 - Primer status and retry time.
 - Reservations.
 - Last selection explanation.
+- A reserved events array for schema compatibility; current diagnostics are written to `events.ndjson`.
 - Schema version.
 
-The version-one schema also reserves `usageSnapshots` and `events` arrays. The current controller keeps usage snapshots in memory and writes operational diagnostics to `events.ndjson`, so those state arrays remain empty.
+The version-one schema persists `usageSnapshots` for restart-safe cached quota state and reserves `events` for compatibility. Operational diagnostics are written to `events.ndjson`.
 
 ## Selection policy
 
@@ -351,12 +354,13 @@ For each account:
 An account is ineligible when:
 
 - It needs reauthentication.
-- It is in a live quota/auth cooldown.
+- It is in a live quota/auth/transient cooldown.
 - Another live request owns its reservation.
 - Its usage is unknown or older than 24 hours.
+- Its weekly reset timestamp is missing or has elapsed without fresh post-reset usage.
 - Its remaining 5-hour quota is below 10%.
 - Its remaining weekly quota is below 3%.
-- It is untouched without a weekly reset clock and priming is disabled or unconfirmed.
+- It is untouched without a weekly reset clock and has not been successfully primed.
 
 Stale-but-last-good data between five minutes and 24 hours is eligible only as a conservative fallback after all fresh candidates are exhausted. Its effective remaining percentages are reduced by five points before applying headroom checks.
 
@@ -430,16 +434,17 @@ Classify quota/rate-limit failures from:
 - HTTP-equivalent error metadata when exposed.
 - `429`, `quota`, `usage limit`, `rate limit`, `too many requests`, and Codex usage-limit codes.
 
-After a quota failure, force-refresh usage. An explicit provider retry time controls the block; otherwise use the latest reset among exhausted windows. If neither is available, use a one-hour cooldown. Every observed deadline is capped at six hours.
+After a quota failure, force-refresh usage. An explicit provider retry time controls the block; otherwise use the latest reset among exhausted windows. If neither is available, use a one-hour cooldown. Failure-derived cooldowns are capped at six hours; a block derived directly from fresh exhausted usage retains the provider's earliest future reset.
 
-An explicit forced refresh reconciles an estimated cooldown: available quota clears it, while the latest observed exhausted-window reset replaces the estimate.
+An explicit forced refresh reconciles an estimated quota cooldown: available quota clears it, while the latest observed exhausted-window reset replaces the estimate.
+Independently, a fresh snapshot showing a 100% exhausted window creates a quota block until its earliest future reset when no other live block governs the account. Auth and transient blocks are not cleared by usage reconciliation.
 
 ### Authentication classification
 
 - Refresh expired tokens before the request.
 - Coalesce concurrent refreshes.
 - Preserve newer credentials when a successful login races an older refresh, usage, or routed-auth failure; permanent invalidation applies only if the rejected access token is still current.
-- On the first generic `401`, force-refresh once and retry the same account before rotating.
+- On the first generic `401` from usage collection or a routed provider call, force-refresh once and retry the same account before rotating.
 - Definitive `invalid_grant`, revoked-token, malformed access-token, or identity-mismatch responses mark the account `needsReauth` when the rejected credential is still current.
 - A transient refresh network failure causes a one-minute cooldown, not permanent invalidation.
 - No credential value appears in logs, notifications, state, or thrown messages.
@@ -455,10 +460,10 @@ After model-visible output begins, the wrapper forwards the provider error and n
 Before any output, the wrapper waits for the earliest known recovery when:
 
 - At least one account is temporarily blocked rather than permanently invalid.
-- The wait is at most six hours.
+- The wait remains inside the configured limit, which defaults to six hours.
 - The caller's abort signal remains active.
 
-The wait re-checks persisted state and the managed account list at most once per minute, so a peer process login, refresh, usage correction, or reservation release can wake the request before the original retry deadline. Escape/user abort ends the wait immediately.
+The wait re-checks persisted state and the managed account list at most once per minute, so a peer process login, refresh, usage correction, or reservation release can wake the request as soon as any recoverable account is available. Every wait in one routed request shares one cumulative configured deadline. Escape/user abort ends the wait immediately.
 
 ## Concurrency model
 
@@ -469,8 +474,8 @@ Multiple Pi processes share the same vault and state directory.
 - Account selection and lease acquisition are one atomic critical section.
 - A selected account is unavailable to other request ids until release or lease expiry.
 - OAuth refresh uses an account-specific lock and re-check-after-lock.
-- Usage fetches are coalesced per account within a process.
-- Primer sweeps use a singleton lease, so only one process primes at a time.
+- Usage fetches are coalesced per process; a forced request arriving during an ordinary request queues one follow-up fetch. Persisted snapshots are reloaded before each controller lookup.
+- Priming uses a singleton lease, so only one process can prime at a time.
 - Locks have bounded acquisition time and stale-owner recovery.
 - Lock timeout never causes an unsafe write; the operation returns a visible retryable error.
 
@@ -481,17 +486,17 @@ One command family:
 - `/quota-router` — show compact status and the highlighted command guide.
 - `/quota-router help` — show the same status and command guide.
 - `/quota-router status` — print compact active-account and quota status.
-- `/quota-router list` — list managed ids, labels, and reauthentication state.
-- `/quota-router accounts` — alias of `list`.
+- `/quota-router list` — list managed ids, labels, reauthentication state, and cached quota state.
+- `/quota-router accounts` — compatibility alias of `list`.
 - `/quota-router login [label]` — add or update a Codex OAuth account.
 - `/quota-router use <account|auto>` — set or clear manual override.
 - `/quota-router refresh [account|all]` — refresh OAuth if needed and force fresh quota usage.
 - `/quota-router prime [account|all]` — confirm one minimal request, refresh the selected account's quota, then stop.
-- `/quota-router policy` — print the active routing, headroom, and priming configuration.
+- `/quota-router policy` — print the active JSON policy.
 - `/quota-router reset <cooldowns|reservations|priming|all>` — clear recoverable state without deleting credentials.
 - `/quota-router verify` — validate persisted schemas and required file permissions.
 - `/quota-router path` — show vault, config, state, and log paths.
-- `/quota-router log [on|off]` — show or toggle the bounded diagnostic log.
+- `/quota-router log [on|off]` — show or toggle the bounded diagnostic log for the current Pi session.
 
 All read-only commands work in non-interactive mode. Mutating commands return exact summaries and never silently discard account state.
 
@@ -501,7 +506,7 @@ The footer shows:
 Codex · work@example · 5h 72% · 7d 41%/18h · urgent 0.023/h · auto
 ```
 
-The final field is `auto`, `manual`, or `login`; unknown usage or reset values render as `?`.
+The final field is `auto`, `manual`, or `login`; unknown cached usage or reset values render as `?`.
 
 ## Persistence and security
 
@@ -566,7 +571,7 @@ Each atomic selection persists a credential-free `lastSelection` explanation in 
 - Duplicate `accountId` login updates rather than duplicates.
 - Successful reauthentication clears the account's permanent auth block.
 - Stale auth failures cannot invalidate credentials installed by a concurrent re-login.
-- Forced fresh non-exhausted usage clears an estimated cooldown.
+- Forced fresh non-exhausted usage clears an estimated quota cooldown without clearing authentication or transient blocks.
 - Recovery waiting notices an account added by a peer.
 
 ### Storage tests

@@ -15,7 +15,11 @@ import { createEventLog } from "./logging/event-log.ts";
 import { createPrimingController } from "./priming/priming-controller.ts";
 import type { ProviderController } from "./provider.ts";
 import { classifyFailure, type FailureClass } from "./recovery/failure-classifier.ts";
-import { blockFromFailure, reconcileUsageBlock } from "./recovery/recovery-state.ts";
+import {
+  blockFromFailure,
+  blockFromUsage,
+  reconcileUsageBlock,
+} from "./recovery/recovery-state.ts";
 import { waitForRecovery } from "./recovery/wait-for-recovery.ts";
 import { createReservationStore } from "./routing/reservation-store.ts";
 import { selectAndReserve } from "./routing/select-and-reserve.ts";
@@ -32,7 +36,7 @@ import {
   RuntimeStateFileSchema,
 } from "./storage/schemas.ts";
 import { createRoutedStream } from "./stream/routed-stream.ts";
-import type { Candidate, RouterConfig } from "./types.ts";
+import type { Candidate, RouterConfig, UsageSnapshot } from "./types.ts";
 import {
   CodexUsageHttpError,
   type FetchImplementation,
@@ -45,7 +49,6 @@ export interface RouterController extends ProviderController {
   operations: QuotaRouterOperations;
   assertReady(): Promise<void>;
   setForegroundActive(active: boolean): void;
-  schedulePriming(): void;
   shutdown(): Promise<void>;
 }
 
@@ -77,7 +80,8 @@ export async function createRouterController(
     schema: RuntimeStateFileSchema,
     createDefault: () => structuredClone(defaultRuntimeState),
   });
-  let cachedConfig = await configStore.read();
+  const [initialConfig, initialState] = await Promise.all([configStore.read(), stateStore.read()]);
+  let cachedConfig = initialConfig;
   const vault = createAccountVault({
     store: vaultStore,
     oauth: options.oauth,
@@ -120,6 +124,70 @@ export async function createRouterController(
     freshnessMs: () => cachedConfig.usageFreshnessMs,
     fetchUsage,
   });
+  for (const snapshot of initialState.usageSnapshots) {
+    usage.hydrate(snapshot);
+  }
+
+  const persistUsageSnapshot = async (snapshot: UsageSnapshot): Promise<void> => {
+    await stateStore.update((state) => {
+      const now = clock();
+      const existing = state.usageSnapshots.find((value) => value.accountId === snapshot.accountId);
+      const persisted =
+        existing &&
+        (existing.observedAt > snapshot.observedAt ||
+          (existing.observedAt === snapshot.observedAt && !existing.stale && snapshot.stale))
+          ? existing
+          : snapshot;
+      const reconciledBlocks = state.blocks.flatMap((block) => {
+        if (
+          block.accountId !== persisted.accountId ||
+          persisted.stale ||
+          persisted.observedAt <= block.blockedAt
+        ) {
+          return [block];
+        }
+        const reconciled = reconcileUsageBlock(block, persisted, now);
+        return reconciled ? [reconciled] : [];
+      });
+      const usageBlock = persisted.stale
+        ? undefined
+        : blockFromUsage(persisted.accountId, persisted, now);
+      const currentBlock = reconciledBlocks.find(
+        (block) => block.accountId === persisted.accountId,
+      );
+      const blocks =
+        usageBlock &&
+        (!currentBlock || (currentBlock.retryAt !== undefined && currentBlock.retryAt <= now))
+          ? [
+              ...reconciledBlocks.filter((block) => block.accountId !== persisted.accountId),
+              usageBlock,
+            ]
+          : reconciledBlocks;
+      return {
+        ...state,
+        usageSnapshots: [
+          ...state.usageSnapshots.filter((value) => value.accountId !== snapshot.accountId),
+          persisted,
+        ],
+        blocks,
+      };
+    });
+  };
+
+  const getUsage = async (
+    accountId: string,
+    getOptions?: Parameters<typeof usage.get>[1],
+  ): Promise<UsageSnapshot> => {
+    const persisted = (await stateStore.read()).usageSnapshots.find(
+      (snapshot) => snapshot.accountId === accountId,
+    );
+    if (persisted) {
+      usage.hydrate(persisted);
+    }
+    const snapshot = await usage.get(accountId, getOptions);
+    await persistUsageSnapshot(snapshot);
+    return snapshot;
+  };
   let displayAccountId: string | undefined;
   let lastSuccessfulAccountId: string | undefined;
   let currentLabel = "none";
@@ -131,7 +199,7 @@ export async function createRouterController(
     stateStore,
     reservations,
     usage: {
-      get: (accountId, getOptions) => usage.get(accountId, getOptions),
+      get: (accountId, getOptions) => getUsage(accountId, getOptions),
     },
     listAccountIds: async () => (await vault.list()).map((account) => account.id),
     executePrimer: async (request, signal) => {
@@ -189,15 +257,13 @@ export async function createRouterController(
       const candidates = await Promise.all(
         summaries.map(async (account): Promise<Candidate> => {
           const snapshot = config.manualAccountId
-            ? usage.peek(account.id)
-            : await usage
-                .get(account.id, {
-                  ...(request.options?.signal ? { signal: request.options.signal } : {}),
-                })
-                .catch(() => {
-                  request.options?.signal?.throwIfAborted();
-                  return undefined;
-                });
+            ? undefined
+            : await getUsage(account.id, {
+                ...(request.options?.signal ? { signal: request.options.signal } : {}),
+              }).catch(() => {
+                request.options?.signal?.throwIfAborted();
+                return undefined;
+              });
           const block = state.blocks.find((value) => value.accountId === account.id);
           return {
             accountId: account.id,
@@ -206,7 +272,8 @@ export async function createRouterController(
             ...(snapshot ? { usage: snapshot } : {}),
             ...(block ? { block } : {}),
             untouched:
-              snapshot?.shortWindow.usedPercent === 0 &&
+              snapshot !== undefined &&
+              snapshot.shortWindow.usedPercent === 0 &&
               snapshot.weeklyWindow?.usedPercent === 0 &&
               snapshot.weeklyWindow.resetsAt === undefined &&
               !state.priming.confirmedAccountIds.includes(account.id),
@@ -272,7 +339,7 @@ export async function createRouterController(
       }
       const snapshot =
         failure.kind === "quota"
-          ? await usage.get(accountId, { force: true }).catch(() => usage.peek(accountId))
+          ? await getUsage(accountId, { force: true }).catch(() => usage.peek(accountId))
           : usage.peek(accountId);
       await stateStore.update((state) => ({
         ...state,
@@ -296,30 +363,39 @@ export async function createRouterController(
     },
     release: (leaseToken) => reservations.release(leaseToken).then(() => undefined),
     renew: (leaseToken, ttlMs) => reservations.renew(leaseToken, clock(), ttlMs),
-    waitForRecovery: (accountIds, knownAccountIds, signal) =>
+    recoveryDeadline: () => clock() + cachedConfig.maxRecoveryWaitMs,
+    waitForRecovery: (accountIds, knownAccountIds, deadline, signal) =>
       waitForRecovery({
         stateStore,
         clock,
         accountIds,
         knownAccountIds,
         listAccountIds: async () => (await vault.list()).map((account) => account.id),
-        maxWaitMs: cachedConfig.maxRecoveryWaitMs,
+        deadline,
         ...(signal ? { signal } : {}),
       }),
     maxAttempts: () => cachedConfig.maxRotationAttempts,
   });
 
   const statusText = async (): Promise<string> => {
-    const [config, accounts] = await Promise.all([configStore.read(), vault.list()]);
+    const [config, accounts, state] = await Promise.all([
+      configStore.read(),
+      vault.list(),
+      stateStore.read(),
+    ]);
     cachedConfig = config;
-    const statusAccountId = config.manualAccountId ?? displayAccountId ?? accounts[0]?.id;
+    const statusAccountId =
+      config.manualAccountId ??
+      displayAccountId ??
+      state.lastSelection?.accountId ??
+      accounts[0]?.id;
     const displayAccount = accounts.find((account) => account.id === statusAccountId);
     const snapshot = statusAccountId ? usage.peek(statusAccountId) : undefined;
     return formatCompactStatus({
       label: displayAccount?.label ?? currentLabel,
       ...(snapshot ? { snapshot } : {}),
       ...(snapshot ? { urgency: weeklyUrgency(snapshot, clock()) } : {}),
-      mode: config.manualAccountId ? "manual" : accounts.length > 0 ? "auto" : "login",
+      mode: accounts.length === 0 ? "login" : config.manualAccountId ? "manual" : "auto",
       now: clock(),
     });
   };
@@ -344,33 +420,49 @@ export async function createRouterController(
     return matches;
   };
 
+  const listAccounts = async (): Promise<string> => {
+    const accounts = await vault.list();
+    return accounts.length === 0
+      ? "No managed Codex accounts. Run /quota-router login."
+      : accounts
+          .map((account) => {
+            const snapshot = usage.peek(account.id);
+            const quota = snapshot
+              ? [
+                  `5h ${remainingPercent(snapshot.shortWindow.usedPercent)}% remaining`,
+                  snapshot.weeklyWindow
+                    ? `7d ${remainingPercent(snapshot.weeklyWindow.usedPercent)}% remaining`
+                    : "7d quota unknown",
+                ].join(" · ")
+              : "quota unknown";
+            return `${account.id} · ${account.label} · ${
+              account.needsReauth ? "reauth required" : "ready"
+            } · ${quota}`;
+          })
+          .join("\n");
+  };
+
   const operations: QuotaRouterOperations = {
     dashboard: statusText,
     status: statusText,
-    async accounts() {
-      const accounts = await vault.list();
-      return accounts.length === 0
-        ? "No managed Codex accounts. Run /quota-router login."
-        : accounts
-            .map(
-              (account) =>
-                `${account.id} · ${account.label} · ${account.needsReauth ? "reauth required" : "ready"}`,
-            )
-            .join("\n");
-    },
+    accounts: listAccounts,
+    list: listAccounts,
     async login(label, ctx) {
       const result = await performCodexLogin({
         ctx,
         ...(label ? { label } : {}),
         vault,
         ...(options.login ? { login: options.login } : {}),
+        onAccountAdded: async ({ id, label: addedLabel }) => {
+          await stateStore.update((state) => ({
+            ...state,
+            blocks: state.blocks.filter((block) => block.accountId !== id || block.kind !== "auth"),
+          }));
+          usage.invalidate(id);
+          displayAccountId = id;
+          currentLabel = addedLabel;
+        },
       });
-      await stateStore.update((state) => ({
-        ...state,
-        blocks: state.blocks.filter(
-          (block) => block.accountId !== result.id || block.kind !== "auth",
-        ),
-      }));
       displayAccountId = result.id;
       currentLabel = result.label;
       return result.message;
@@ -400,17 +492,7 @@ export async function createRouterController(
       }
       for (const account of selected) {
         await vault.getFreshCredential(account.id);
-        const snapshot = await usage.get(account.id, { force: true });
-        await stateStore.update((state) => ({
-          ...state,
-          blocks: state.blocks.flatMap((block) => {
-            if (block.accountId !== account.id) {
-              return [block];
-            }
-            const reconciled = reconcileUsageBlock(block, snapshot, clock());
-            return reconciled ? [reconciled] : [];
-          }),
-        }));
+        await getUsage(account.id, { force: true });
       }
       return `Refreshed ${selected.length} Codex account${selected.length === 1 ? "" : "s"}.`;
     },
@@ -507,9 +589,6 @@ export async function createRouterController(
     setForegroundActive(active) {
       priming.setForegroundActive(active);
     },
-    schedulePriming() {
-      priming.scheduleSweep("idle");
-    },
     async shutdown() {
       await priming.shutdown();
     },
@@ -518,4 +597,8 @@ export async function createRouterController(
 
 function formatMode(mode: number | undefined): string {
   return mode === undefined ? "missing" : mode.toString(8).padStart(4, "0");
+}
+
+function remainingPercent(usedPercent: number): number {
+  return Math.max(0, Math.round(100 - usedPercent));
 }

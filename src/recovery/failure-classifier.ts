@@ -7,57 +7,99 @@ export type FailureClass =
   | { kind: "aborted" };
 
 export function classifyFailure(error: unknown, now: number): FailureClass {
-  const status = numericProperty(error, "status") ?? numericProperty(error, "statusCode");
-  const code = stringProperty(error, "code").toLowerCase();
-  const name = stringProperty(error, "name").toLowerCase();
-  const message =
-    typeof error === "string"
-      ? error.toLowerCase()
-      : error instanceof Error
-        ? error.message.toLowerCase()
-        : "";
+  const errors = errorChain(error);
+  const status = firstNumber(errors, "status") ?? firstNumber(errors, "statusCode");
+  const codes = errors.map((value) => stringProperty(value, "code").toLowerCase());
+  const names = errors.map((value) => stringProperty(value, "name").toLowerCase());
+  const messages = errors.map((value) =>
+    typeof value === "string"
+      ? value.toLowerCase()
+      : value instanceof Error
+        ? value.message.toLowerCase()
+        : "",
+  );
+  const hasCode = (...values: string[]) => codes.some((code) => values.includes(code));
+  const hasName = (value: string) => names.includes(value);
+  const hasMessage = (value: string) => messages.some((message) => message.includes(value));
 
-  if (name === "aborterror" || code === "abort_err" || code === "aborted") {
+  if (hasName("aborterror") || hasCode("abort_err", "aborted")) {
     return { kind: "aborted" };
   }
-  if (name === "accountneedsreautherror") {
+  if (hasName("accountneedsreautherror")) {
     return { kind: "auth-invalid" };
   }
-  if (name === "tokenrefreshtransienterror") {
+  if (hasName("tokenrefreshtransienterror")) {
     return { kind: "transient", retryAt: now + 60_000 };
   }
   if (
-    code === "invalid_grant" ||
-    code === "token_revoked" ||
-    message.includes("invalid_grant") ||
-    message.includes("refresh token was revoked")
+    hasCode("invalid_grant", "token_revoked") ||
+    hasMessage("invalid_grant") ||
+    hasMessage("refresh token was revoked")
   ) {
     return { kind: "auth-invalid" };
   }
-  if (status === 401 || message.includes("401") || message.includes("unauthorized")) {
+  if (status === 401 || hasMessage("401") || hasMessage("unauthorized")) {
     return { kind: "auth-retry" };
   }
   if (
     status === 429 ||
-    code.includes("usage_limit") ||
-    code.includes("quota") ||
-    message.includes("rate limit") ||
-    message.includes("usage limit") ||
-    message.includes("quota") ||
-    message.includes("too many requests")
+    codes.some((code) => code.includes("usage_limit") || code.includes("quota")) ||
+    hasMessage("rate limit") ||
+    hasMessage("usage limit") ||
+    hasMessage("quota") ||
+    hasMessage("too many requests")
   ) {
-    const retryAt = numericProperty(error, "retryAt");
+    const retryAt = firstNumber(errors, "retryAt");
     return retryAt === undefined ? { kind: "quota" } : { kind: "quota", retryAt };
   }
   if (
-    code === "etimedout" ||
-    code === "econnreset" ||
-    code === "enetwork" ||
-    name === "timeouterror"
+    hasCode(
+      "etimedout",
+      "econnreset",
+      "econnrefused",
+      "enotfound",
+      "enetwork",
+      "eai_again",
+      "und_err_connect_timeout",
+      "und_err_headers_timeout",
+      "und_err_body_timeout",
+      "und_err_socket",
+    ) ||
+    hasName("timeouterror") ||
+    hasMessage("fetch failed")
   ) {
     return { kind: "transient", retryAt: now + 60_000 };
   }
   return { kind: "fatal" };
+}
+
+function errorChain(error: unknown): unknown[] {
+  const values: unknown[] = [];
+  const seen = new Set<unknown>();
+  let current: unknown = error;
+  while (current !== undefined && current !== null && !seen.has(current)) {
+    values.push(current);
+    seen.add(current);
+    current = objectProperty(current, "cause");
+  }
+  return values;
+}
+
+function firstNumber(values: unknown[], property: string): number | undefined {
+  for (const value of values) {
+    const result = numericProperty(value, property);
+    if (result !== undefined) {
+      return result;
+    }
+  }
+  return undefined;
+}
+
+function objectProperty(value: unknown, property: string): unknown {
+  if (typeof value !== "object" || value === null || !(property in value)) {
+    return undefined;
+  }
+  return value[property as keyof typeof value];
 }
 
 function stringProperty(value: unknown, property: string): string {
