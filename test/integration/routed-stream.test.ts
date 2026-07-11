@@ -81,6 +81,7 @@ function dependencies(accounts: string[], baseStream: RoutedStreamDependencies["
       renewed.push(leaseToken);
       return true;
     },
+    recoveryDeadline: () => 2_000_021_600_000,
     waitForRecovery: async () => undefined,
     maxAttempts: () => 5,
   };
@@ -200,6 +201,41 @@ describe("RoutedStream", () => {
     expect(events).toHaveLength(1);
     expect(events[0]?.type).toBe("error");
     expect(waits).toBe(0);
+  });
+
+  test("reuses one recovery deadline across every wait in a routed request", async () => {
+    const setup = dependencies(["a"], () => eventStream(successfulText()));
+    let selections = 0;
+    let deadlines = 0;
+    const waitDeadlines: number[] = [];
+    setup.value.selectAndReserve = async () => {
+      selections += 1;
+      if (selections <= 2) {
+        return {
+          kind: "unavailable",
+          reason: "blocked",
+          recoverableAccountIds: ["a"],
+          knownAccountIds: ["a"],
+        };
+      }
+      return {
+        kind: "selected",
+        lease: { accountId: "a", leaseToken: "lease-a", reservationTtlMs: 120_000 },
+      };
+    };
+    setup.value.recoveryDeadline = () => {
+      deadlines += 1;
+      return 2_000_021_600_000;
+    };
+    setup.value.waitForRecovery = async (_accountIds, _knownAccountIds, deadline) => {
+      waitDeadlines.push(deadline);
+    };
+
+    const events = await collect(createRoutedStream(setup.value)(model, context));
+
+    expect(events.at(-1)?.type).toBe("done");
+    expect(deadlines).toBe(1);
+    expect(waitDeadlines).toEqual([2_000_021_600_000, 2_000_021_600_000]);
   });
 
   test("renews a lease while a request remains active", async () => {

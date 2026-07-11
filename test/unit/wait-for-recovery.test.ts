@@ -159,4 +159,22 @@ describe("waitForRecovery", () => {
     ).rejects.toBeInstanceOf(RecoveryWaitTimeoutError);
     expect(now).toBe(START + 500);
   });
+
+  test("honors an absolute deadline supplied by the routed request", async () => {
+    let now = START + 400;
+    const store = await setup(START + 10_000);
+
+    await expect(
+      waitForRecovery({
+        stateStore: store,
+        clock: () => now,
+        deadline: START + 500,
+        maxWaitMs: 10_000,
+        sleep: async (milliseconds) => {
+          now += milliseconds;
+        },
+      }),
+    ).rejects.toBeInstanceOf(RecoveryWaitTimeoutError);
+    expect(now).toBe(START + 500);
+  });
 });

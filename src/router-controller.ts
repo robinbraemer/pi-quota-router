@@ -363,14 +363,15 @@ export async function createRouterController(
     },
     release: (leaseToken) => reservations.release(leaseToken).then(() => undefined),
     renew: (leaseToken, ttlMs) => reservations.renew(leaseToken, clock(), ttlMs),
-    waitForRecovery: (accountIds, knownAccountIds, signal) =>
+    recoveryDeadline: () => clock() + cachedConfig.maxRecoveryWaitMs,
+    waitForRecovery: (accountIds, knownAccountIds, deadline, signal) =>
       waitForRecovery({
         stateStore,
         clock,
         accountIds,
         knownAccountIds,
         listAccountIds: async () => (await vault.list()).map((account) => account.id),
-        maxWaitMs: cachedConfig.maxRecoveryWaitMs,
+        deadline,
         ...(signal ? { signal } : {}),
       }),
     maxAttempts: () => cachedConfig.maxRotationAttempts,

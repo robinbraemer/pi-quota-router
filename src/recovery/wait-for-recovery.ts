@@ -31,11 +31,12 @@ export interface WaitForRecoveryOptions {
   signal?: AbortSignal;
   recheckMs?: number;
   maxWaitMs?: number;
+  deadline?: number;
 }
 
 export async function waitForRecovery(options: WaitForRecoveryOptions): Promise<void> {
   const startedAt = options.clock();
-  const deadline = startedAt + (options.maxWaitMs ?? DEFAULT_MAX_WAIT_MS);
+  const deadline = options.deadline ?? startedAt + (options.maxWaitMs ?? DEFAULT_MAX_WAIT_MS);
   const recheckMs = options.recheckMs ?? DEFAULT_RECHECK_MS;
   const sleep =
     options.sleep ??

@@ -406,6 +406,7 @@ function routedDependencies(baseStream: RoutedStreamDependencies["baseStream"]):
       recordSuccess: () => undefined,
       release: async () => undefined,
       renew: async () => true,
+      recoveryDeadline: () => NOW + defaultConfig.maxRecoveryWaitMs,
       waitForRecovery: async () => undefined,
       maxAttempts: () => defaultConfig.maxRotationAttempts,
     },
