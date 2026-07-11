@@ -4,7 +4,7 @@ Start with:
 
 ```text
 /quota-router verify
-/quota-router accounts
+/quota-router list
 /quota-router path
 ```
 
@@ -41,7 +41,7 @@ Start with:
 | `InvalidCodexTokenError` | OAuth returned a token without the expected namespaced Codex account claim. | Retry login; if it repeats, update normal Pi because the provider token contract may have changed. |
 | `AccountNeedsReauthError` | Credentials were revoked, returned `invalid_grant`, changed identity, or were already invalidated. | Login that account again. It remains excluded until then. |
 | `TokenRefreshTransientError` | Refresh had a network/shape failure or could not obtain the refresh lock within five seconds. | Check networking and peer Pi processes, then retry. Do not delete the account. |
-| `AccountNotFoundError` | A command referenced a removed/unknown managed id. | Run `/quota-router accounts` and use the current id or label. |
+| `AccountNotFoundError` | A command referenced a removed/unknown managed id. | Run `/quota-router list` and use the current id or label. |
 | `StoreValidationError` | Persisted JSON is malformed or violates the version-one schema. | Back up the router directory, repair the file using the documented schema, or move only non-credential config/state aside for recreation. |
 | `StoreLockTimeoutError` | A JSON state lock remained contended for five seconds. | Wait for peer work; check for a stuck Pi process. Reset reservations only after confirming no peer is active. |
 | `ReservationLostError` | An active request's persisted lease disappeared or could not be renewed. | Retry the turn after checking peer processes. Do not reset reservations while any Pi process is active. |
@@ -81,4 +81,4 @@ All normal Codex model ids should appear. The release smoke test installs an exa
 - `reset priming` forgets observed primer results and retry clocks. One-shot command confirmations are ephemeral and are never stored.
 - `reset all` combines those non-credential resets. It never removes `accounts.json`.
 
-Diagnostic events are redacted and bounded, but still avoid sharing the log without review. Toggle them with `/quota-router log off` and find them with `/quota-router path`.
+Diagnostic events are redacted and bounded, but still avoid sharing the log without review. Toggle them for the current Pi session with `/quota-router log off` and find them with `/quota-router path`.

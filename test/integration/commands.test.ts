@@ -72,7 +72,7 @@ describe("/quota-router commands", () => {
       "dashboard:",
       "status:",
       "accounts:",
-      "accounts:",
+      "list:",
       "login:Work",
       "status:",
       "use:auto",

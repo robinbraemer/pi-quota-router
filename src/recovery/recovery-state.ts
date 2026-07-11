@@ -93,7 +93,7 @@ function latestExhaustedReset(usage: UsageSnapshot | undefined, now: number): nu
 
 function exhaustedResets(usage: UsageSnapshot | undefined, now: number): number[] {
   if (!usage) {
-    return undefined;
+    return [];
   }
   const windows = [usage.shortWindow, usage.weeklyWindow];
   const resets = windows

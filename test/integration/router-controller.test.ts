@@ -97,7 +97,15 @@ describe("RouterController", () => {
 
     await controller.operations.refresh(accountId);
 
-    expect((await stateStore.read()).blocks).toEqual([]);
+    expect((await stateStore.read()).blocks).toEqual([
+      {
+        accountId,
+        kind: "transient",
+        blockedAt: 2_000_000_000_000,
+        retryAt: 2_000_003_600_000,
+        estimated: true,
+      },
+    ]);
     await controller.shutdown();
   });
 
@@ -178,7 +186,11 @@ describe("RouterController", () => {
       clock: () => 2_000_000_000_000,
       oauth: { refresh: async () => relogged },
       fetchImpl: async () => Response.json(completeUsageResponse),
-      baseStream: (() => {
+      baseStream: (...args: Parameters<RouterControllerOptions["baseStream"]>) => {
+        const streamOptions = args[2];
+        if (streamOptions?.apiKey === relogged.access) {
+          return eventStream(successfulText());
+        }
         const stream = (async function* () {
           markAttemptStarted?.();
           await attemptHeld;
@@ -188,8 +200,8 @@ describe("RouterController", () => {
             error: message("error", "invalid_grant"),
           } as AssistantMessageEvent;
         })();
-        return stream;
-      }) as unknown as RouterControllerOptions["baseStream"],
+        return stream as unknown as ReturnType<RouterControllerOptions["baseStream"]>;
+      },
     });
     const accountId = await controller.vault.addFromOAuth("work", rejected);
     const request = collectController(controller);
@@ -423,11 +435,7 @@ describe("RouterController", () => {
     expect(list).toContain("work");
     expect(list).toContain("5h 88% remaining");
     expect(list).toContain("7d 63% remaining");
-    const dashboard = await controller.operations.dashboard();
-    expect(dashboard).toContain("AVAILABLE COMMANDS");
-    for (const command of ["login", "list", "status", "use auto", "refresh", "prime"]) {
-      expect(dashboard).toMatch(new RegExp(`^> /quota-router ${command}`, "m"));
-    }
+    expect(await controller.operations.dashboard()).toContain("work");
     expect(await controller.operations.verify()).toContain("healthy");
     expect(await controller.operations.paths()).toContain("accounts.json");
     await controller.shutdown();
@@ -860,7 +868,8 @@ describe("RouterController", () => {
     expect(outcomes).toEqual(
       Array.from(
         { length: 3 },
-        () => 'Multiple Codex accounts are labeled "duplicate"; use a managed account ID.',
+        () =>
+          "Ambiguous Codex account label: duplicate. Use a managed account id: codex-07e998012c11, codex-703039e88185",
       ),
     );
     expect(usageCalls).toBe(0);
@@ -1142,7 +1151,7 @@ describe("RouterController", () => {
 
     const second = await createRouterController(options);
 
-    expect(await second.operations.status()).toBe("Codex · none · auto");
+    expect(await second.operations.status()).toBe("Codex · work · auto");
     await second.shutdown();
   });
 

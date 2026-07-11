@@ -226,8 +226,6 @@ describe("quota router end-to-end guarantees", () => {
       enabled: false,
       confirmedFirstUseRollingWindow: false,
     });
-    controller.schedulePriming();
-    await Bun.sleep(10);
     expect(primerCalls).toBe(1);
     expect(primerModelId).toBe(selectedModel.id);
     expect((await collect(controller.routedStream(model, context))).at(-1)?.type).toBe("done");

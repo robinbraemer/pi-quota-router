@@ -58,6 +58,7 @@ Primer work renews both its singleton sweep lease and account lease. Foreground 
 ## Failure and recovery policy
 
 - Pre-output `429`, quota, usage-limit, or rate-limit errors block the account and may rotate to another account.
+- When no other live block governs the account, fresh usage showing an exhausted window creates a quota block until the earliest future reset. A cached snapshot is refreshed as soon as either recorded reset time elapses.
 - A transport `start` event is replay-safe.
 - Any text, thinking, or tool-call start makes replay unsafe; later errors are forwarded without account rotation.
 - A request performs at most five account attempts.

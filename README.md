@@ -2,7 +2,7 @@
 
 Pi Quota Router is a normal-Pi extension for several equivalent ChatGPT Codex accounts. It keeps the selected `openai-codex` model and thinking level unchanged, but chooses the account whose useful weekly quota is most urgent to spend.
 
-It refreshes 5-hour and weekly usage before selection, reserves accounts across concurrent Pi processes, refreshes OAuth tokens under a cross-process lock, and can fail over only before model-visible output. Optional one-shot priming can start an untouched account's weekly reset clock, but only after two explicit confirmations for that invocation.
+It refreshes 5-hour and weekly usage before automatic selection, reserves accounts across concurrent Pi processes, refreshes OAuth tokens under a cross-process lock, and can fail over only before model-visible output. Optional one-shot priming can start an untouched account's weekly reset clock, but only after two explicit confirmations for that request.
 
 ## Install from GitHub
 
@@ -102,15 +102,15 @@ The confirmations authorize only the current command. They do not change `config
 | `/quota-router refresh [account-or-all]` | Refresh OAuth if needed and force fresh quota usage, reconciling estimated cooldowns. |
 | `/quota-router prime [account-or-all]` | Ask for both confirmations, send at most one minimal primer request, refresh quota, then stop. |
 | `/quota-router policy` | Print the active JSON policy. |
-| `/quota-router reset cooldowns` | Clear persisted quota/auth cooldowns. |
+| `/quota-router reset cooldowns` | Clear persisted quota/auth/transient cooldowns. |
 | `/quota-router reset reservations` | Clear persisted request leases. Use only when no peer Pi process is active. |
 | `/quota-router reset priming` | Clear observed primer results and retry times. |
 | `/quota-router reset all` | Clear all non-credential runtime state. |
 | `/quota-router verify` | Validate router files and report the managed account count. |
 | `/quota-router path` | Print every router data path. |
-| `/quota-router log [on\|off]` | Show, enable, or disable the bounded diagnostic event log. |
+| `/quota-router log [on\|off]` | Show, enable, or disable the bounded diagnostic event log for this Pi session. |
 
-A manual account is selected without a preliminary usage fetch and bypasses automatic freshness, untouched-clock, and headroom ranking. It is still rejected if it needs reauthentication or has an active block/reservation. Return to `auto` when the exceptional task is finished.
+A manual account is selected without first fetching quota usage and bypasses automatic freshness, untouched-clock, and headroom checks. It is still rejected if it needs reauthentication or has an active block/reservation. If labels are duplicated, select the account by its managed id from `list`. Return to `auto` when the exceptional task is finished.
 
 ## Footer legend
 

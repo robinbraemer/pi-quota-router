@@ -384,14 +384,17 @@ export async function createRouterController(
     ]);
     cachedConfig = config;
     const statusAccountId =
-      config.manualAccountId ?? displayAccountId ?? state.lastSelection?.accountId ?? accounts[0]?.id;
+      config.manualAccountId ??
+      displayAccountId ??
+      state.lastSelection?.accountId ??
+      accounts[0]?.id;
     const displayAccount = accounts.find((account) => account.id === statusAccountId);
     const snapshot = statusAccountId ? usage.peek(statusAccountId) : undefined;
     return formatCompactStatus({
       label: displayAccount?.label ?? currentLabel,
       ...(snapshot ? { snapshot } : {}),
       ...(snapshot ? { urgency: weeklyUrgency(snapshot, clock()) } : {}),
-      mode: config.manualAccountId ? "manual" : accounts.length > 0 ? "auto" : "login",
+      mode: accounts.length === 0 ? "login" : config.manualAccountId ? "manual" : "auto",
       now: clock(),
     });
   };
@@ -517,9 +520,6 @@ export async function createRouterController(
         }
       }
       return results.join("\n");
-    },
-    async confirmPriming() {
-      return "Synthetic priming authorized for this confirmed command.";
     },
     async policy() {
       cachedConfig = await configStore.read();

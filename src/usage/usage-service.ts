@@ -55,6 +55,9 @@ export function createUsageService(options: UsageServiceOptions): UsageService {
         cache.set(accountId, normalized);
         return normalized;
       } catch (error) {
+        if (error instanceof AccountNeedsReauthError) {
+          throw error;
+        }
         const lastGood = cache.get(accountId);
         if (lastGood && clock() - lastGood.observedAt <= maxStaleMs) {
           return { ...lastGood, stale: true };

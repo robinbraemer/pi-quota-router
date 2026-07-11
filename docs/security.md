@@ -12,9 +12,9 @@ The router intentionally does not modify normal Pi's `auth.json`. Duplicate logi
 
 ## Local authorization handoff
 
-The login selector only accepts the expected `https://auth.openai.com/oauth/authorize` origin and path with code response type, client id, and OAuth state, rejects fragments and embedded URL credentials, and never passes provider instructions to a process launcher. Browser and clipboard tools are started with fixed executable names, explicit argv, `shell: false`, and—in the clipboard case—the validated URL on stdin. The only value opened, copied, or shown by this handoff is that validated authorization URL; OAuth credentials and account tokens are not available to the launcher boundary.
+The login selector only accepts the expected `https://auth.openai.com/oauth/authorize` origin and path with code response type, fixed client and callback ids, a valid PKCE challenge, and nonempty OAuth state. It rejects fragments, embedded URL credentials, missing parameters, and duplicate security-sensitive parameters, and never passes provider instructions to a process launcher. Browser and clipboard tools are started with fixed executable names, explicit argv, `shell: false`, and—in the clipboard case—the validated URL on stdin. The only value opened, copied, or shown by this handoff is that validated authorization URL; OAuth credentials and account tokens are not available to the launcher boundary.
 
-The authorization URL contains short-lived OAuth flow state, so it is displayed only as the explicit manual fallback and is never written to router diagnostics. If selection, browser launch, or clipboard access is unavailable, login storage remains unchanged until the normal OAuth exchange succeeds, and the same validated URL remains available for manual opening or copying.
+The authorization URL contains short-lived OAuth flow state, so it is surfaced only during the interactive authorization handoff and is never written to router diagnostics. If selection, browser launch, or clipboard access is unavailable, the same validated URL remains available for manual opening or copying. An unexpected authorization URL aborts the flow before credentials can be persisted; otherwise login storage changes only after the normal OAuth exchange succeeds.
 
 ## Network destinations
 

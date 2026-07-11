@@ -16,8 +16,12 @@ describe("Codex command login", () => {
     await performCodexLogin({
       ...harness.options,
       actions: {
-        open: async (url) => harness.opened.push(url),
-        copy: async (url) => harness.copied.push(url),
+        open: async (url) => {
+          harness.opened.push(url);
+        },
+        copy: async (url) => {
+          harness.copied.push(url);
+        },
       },
     });
     await Bun.sleep(0);
@@ -39,8 +43,12 @@ describe("Codex command login", () => {
     await performCodexLogin({
       ...harness.options,
       actions: {
-        open: async (url) => harness.opened.push(url),
-        copy: async (url) => harness.copied.push(url),
+        open: async (url) => {
+          harness.opened.push(url);
+        },
+        copy: async (url) => {
+          harness.copied.push(url);
+        },
       },
     });
     await Bun.sleep(0);
