@@ -31,12 +31,7 @@ export interface RoutedLease {
 
 export type RouteSelection =
   | { kind: "selected"; lease: RoutedLease }
-  | {
-      kind: "unavailable";
-      reason: string;
-      recoverableAccountIds: string[];
-      knownAccountIds: string[];
-    };
+  | { kind: "unavailable"; reason: string };
 
 export interface RoutedStreamDependencies {
   selectAndReserve(request: RouteAttemptRequest): Promise<RouteSelection>;
@@ -159,7 +154,6 @@ export function createRoutedStream(
                   if (
                     boundary.isReplaySafe() &&
                     canRotateBeforeOutput(failure) &&
-                    attempt < dependencies.maxAttempts() &&
                     !options?.signal?.aborted
                   ) {
                     excludedAccountIds.add(lease.accountId);
@@ -223,7 +217,6 @@ export function createRoutedStream(
               if (
                 boundary.isReplaySafe() &&
                 canRotateBeforeOutput(failure) &&
-                attempt < dependencies.maxAttempts() &&
                 !options?.signal?.aborted
               ) {
                 excludedAccountIds.add(lease.accountId);
@@ -247,7 +240,6 @@ export function createRoutedStream(
           if (
             boundary.isReplaySafe() &&
             canRotateBeforeOutput(failure) &&
-            attempt < dependencies.maxAttempts() &&
             !options?.signal?.aborted
           ) {
             excludedAccountIds.add(lease.accountId);
@@ -263,7 +255,15 @@ export function createRoutedStream(
         }
       }
 
-      output.push(errorEvent(model, "error", lastFailure));
+      output.push(
+        errorEvent(
+          model,
+          "error",
+          lastFailure instanceof RouteUnavailableError
+            ? lastFailure
+            : new RouteUnavailableError("no_eligible_accounts"),
+        ),
+      );
     })().catch((error) => {
       output.push(errorEvent(model, options?.signal?.aborted ? "aborted" : "error", error));
     });
@@ -305,10 +305,7 @@ function sanitizedErrorMessage(reason: "aborted" | "error", error: unknown): str
       ? error.message
       : "The Codex request was cancelled";
   }
-  if (
-    error instanceof ReservationLostError ||
-    error instanceof RouteUnavailableError
-  ) {
+  if (error instanceof ReservationLostError || error instanceof RouteUnavailableError) {
     return error.message;
   }
   return "No Codex account completed the request";

@@ -1638,13 +1638,6 @@ describe("RouterController", () => {
       "work",
       makeCredentials("account-1", 3_000_000_000_000),
     );
-    const configStore = createAtomicJsonStore<RouterConfig>({
-      path: paths.config,
-      schema: RouterConfigSchema,
-      createDefault: () => {
-        throw new Error("config should already exist");
-      },
-    });
     const stateStore = createAtomicJsonStore<RuntimeStateFile>({
       path: paths.state,
       schema: RuntimeStateFileSchema,

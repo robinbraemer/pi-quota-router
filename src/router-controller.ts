@@ -329,8 +329,6 @@ export async function createRouterController(
       return {
         kind: "unavailable",
         reason: selected.decision.reason,
-        recoverableAccountIds: selected.recoverableAccountIds,
-        knownAccountIds: summaries.map((account) => account.id),
       };
     },
     getFreshCredential: (accountId, signal) => vault.getFreshCredential(accountId, signal),

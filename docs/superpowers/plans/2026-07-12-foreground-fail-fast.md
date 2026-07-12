@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make every foreground routed request terminate immediately with an actionable sanitized error when fresh selection finds no eligible Codex account.
+**Goal:** Make every foreground routed request terminate immediately with an actionable sanitized error when fresh selection finds no eligible Codex account or replay-safe pre-output attempts are exhausted.
 
 **Architecture:** Preserve the existing fresh usage evaluation and replay-safe account rotation. Remove foreground recovery waiting from `RoutedStreamDependencies`; unavailable selection becomes a typed terminal route error. Keep the version-one `maxRecoveryWaitMs` field accepted only for strict persisted-config and rollback compatibility.
 
@@ -25,7 +25,7 @@
 - Modify: `src/stream/routed-stream.ts:36-114,319-332`
 
 **Interfaces:**
-- Consumes: `RouteSelection` from `selectAndReserve` with `kind`, `reason`, and existing compatibility metadata.
+- Consumes: `RouteSelection` from `selectAndReserve` with `kind` and `reason`.
 - Produces: `RouteUnavailableError`-backed terminal events; `RoutedStreamDependencies` without `recoveryDeadline` or `waitForRecovery`.
 
 - [ ] **Step 1: Write failing stream tests.** Remove the recovery functions from the test dependency fixture. Replace the recovery-deadline test with these behaviors:
@@ -36,8 +36,6 @@ test("fails immediately when every account is temporarily unavailable", async ()
   setup.value.selectAndReserve = async () => ({
     kind: "unavailable",
     reason: "no_eligible_accounts",
-    recoverableAccountIds: ["a"],
-    knownAccountIds: ["a"],
   });
 
   const events = await collect(createRoutedStream(setup.value)(model, context));
@@ -56,8 +54,6 @@ test("reports an unavailable manual account distinctly", async () => {
   setup.value.selectAndReserve = async () => ({
     kind: "unavailable",
     reason: "manual_account_unavailable",
-    recoverableAccountIds: [],
-    knownAccountIds: ["a"],
   });
 
   const events = await collect(createRoutedStream(setup.value)(model, context));

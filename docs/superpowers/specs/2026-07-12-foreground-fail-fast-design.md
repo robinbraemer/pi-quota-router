@@ -36,8 +36,8 @@ Refresh usage repeatedly while the old request remains open and resume it after 
 
 1. Each foreground request performs the existing fresh account evaluation.
 2. The router may rotate among accounts only before model-visible output and only up to `maxRotationAttempts`.
-3. If selection has no eligible account, the routed stream emits exactly one terminal error and closes immediately.
-4. A selection failure is distinct from a provider-attempt failure:
+3. If selection has no eligible account, or every allowed replay-safe pre-output attempt fails, the routed stream emits exactly one actionable no-eligible terminal error and closes immediately.
+4. Manual selection failure remains distinct from automatic exhaustion:
    - `no_eligible_accounts` reports `No Codex account is currently eligible; quota, usage data, or account health must recover before retrying`.
    - `manual_account_unavailable` reports `The selected Codex account is currently unavailable`.
    - other selection reasons report `No Codex account is available: <reason>` using the router's internal non-secret reason.
@@ -57,7 +57,7 @@ The standalone recovery helper remains available only if another non-foreground 
 
 `src/stream/routed-stream.ts` no longer invokes a recovery waiter on an unavailable selection. It constructs a typed `RouteUnavailableError`, exits the attempt loop, and emits the existing sanitized terminal error event.
 
-The error sanitizer will preserve the approved `RouteUnavailableError` messages while continuing to collapse arbitrary provider failures to `No Codex account completed the request`.
+The error sanitizer will preserve the approved `RouteUnavailableError` messages while continuing to collapse fatal and post-output provider failures to `No Codex account completed the request`.
 
 ### Router controller
 
@@ -71,7 +71,7 @@ README, policy/design provenance, and troubleshooting material state that foregr
 
 Strict RED → GREEN TDD will cover:
 
-1. A routed stream receiving recoverable unavailable accounts terminates immediately without invoking any recovery waiter.
+1. A routed stream receiving an unavailable selection terminates immediately without invoking any recovery waiter.
 2. `no_eligible_accounts` produces the exact sanitized actionable error.
 3. Manual-account unavailability produces its distinct sanitized error.
 4. Arbitrary provider diagnostics remain collapsed and secret-free.
@@ -79,7 +79,8 @@ Strict RED → GREEN TDD will cover:
 6. Pre-output quota rotation still succeeds when another account is eligible.
 7. Post-output failures still never replay.
 8. Version-one configuration containing `maxRecoveryWaitMs` remains valid.
-9. Full unit, integration, end-to-end, type, lint, format, secret, package, and isolated Pi-load gates pass.
+9. Final replay-safe failures from provider events, iterator exceptions, and credential loading produce the same actionable sanitized error even when `maxRotationAttempts` is one.
+10. Full unit, integration, end-to-end, type, lint, format, secret, package, and isolated Pi-load gates pass.
 
 ## Operational rollout
 

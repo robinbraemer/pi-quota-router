@@ -589,7 +589,7 @@ describe("quota router end-to-end guarantees", () => {
     modeCalls = 0;
     const exhaustedAuthEvents = await collect(controller.routedStream(model, boundary.context));
     expect(terminalErrorMessage(exhaustedAuthEvents)).toBe(
-      "No Codex account completed the request",
+      "No Codex account is currently eligible; quota, usage data, or account health must recover before retrying",
     );
     captured.push(exhaustedAuthEvents);
     captured.push(await controller.operations.reset("cooldowns"));
@@ -779,8 +779,6 @@ function routedDependencies(baseStream: RoutedStreamDependencies["baseStream"]):
           return {
             kind: "unavailable",
             reason: "no_eligible_accounts",
-            recoverableAccountIds: [],
-            knownAccountIds: accounts,
           };
         }
         selected.push(accountId);
