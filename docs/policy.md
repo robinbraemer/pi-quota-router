@@ -41,7 +41,7 @@ The top 10% urgency band is hysteresis/tie territory. Its current account is the
 1. If the current account remains eligible and is within 10% of the top urgency, retain it.
 2. Otherwise consider all candidates within 10% of the top urgency.
 3. Prefer the least weekly quota remaining that is still above the 3% floor.
-4. When both candidates report it, prefer the most 5-hour quota remaining.
+4. When every tied candidate reports it, prefer the most 5-hour quota remaining.
 5. Finally use lexical managed account id for deterministic selection.
 
 Stable managed ids are truncated SHA-256 derivatives of raw Codex account ids. Raw ids never enter selection logs.

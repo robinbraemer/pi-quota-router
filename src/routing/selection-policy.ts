@@ -80,21 +80,24 @@ export function selectAccount(input: SelectionInput): SelectionDecision {
     }
   }
 
-  const tied = tier
-    .filter((value) => value.ranked.urgency >= threshold)
-    .sort((left, right) => {
-      if (left.ranked.weeklyRemaining !== right.ranked.weeklyRemaining) {
-        return left.ranked.weeklyRemaining - right.ranked.weeklyRemaining;
-      }
-      if (
-        left.ranked.shortRemaining !== undefined &&
-        right.ranked.shortRemaining !== undefined &&
-        left.ranked.shortRemaining !== right.ranked.shortRemaining
-      ) {
-        return right.ranked.shortRemaining - left.ranked.shortRemaining;
-      }
-      return left.ranked.candidate.accountId.localeCompare(right.ranked.candidate.accountId);
-    });
+  const tied = tier.filter((value) => value.ranked.urgency >= threshold);
+  const useShortWindowTieBreak = tied.every((value) => value.ranked.shortRemaining !== undefined);
+  tied.sort((left, right) => {
+    if (left.ranked.weeklyRemaining !== right.ranked.weeklyRemaining) {
+      return left.ranked.weeklyRemaining - right.ranked.weeklyRemaining;
+    }
+    const leftShortRemaining = left.ranked.shortRemaining;
+    const rightShortRemaining = right.ranked.shortRemaining;
+    if (
+      useShortWindowTieBreak &&
+      leftShortRemaining !== undefined &&
+      rightShortRemaining !== undefined &&
+      leftShortRemaining !== rightShortRemaining
+    ) {
+      return rightShortRemaining - leftShortRemaining;
+    }
+    return left.ranked.candidate.accountId.localeCompare(right.ranked.candidate.accountId);
+  });
   const selected = tied[0];
   if (!selected) {
     return { reason: "no_eligible_accounts", candidates: explanations };

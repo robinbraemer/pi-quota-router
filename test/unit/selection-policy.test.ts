@@ -263,6 +263,29 @@ describe("quota-aware selection", () => {
     expect(lexical.accountId).toBe("a");
   });
 
+  test("uses stable ids for mixed short-window ties regardless of input order", () => {
+    const lowShort = candidate("a", NOW, { shortRemaining: 70 });
+    const weeklyOnly = candidate("b", NOW, { shortWindow: false });
+    const highShort = candidate("c", NOW, { shortRemaining: 80 });
+    const permutations = [
+      [lowShort, weeklyOnly, highShort],
+      [lowShort, highShort, weeklyOnly],
+      [weeklyOnly, lowShort, highShort],
+      [weeklyOnly, highShort, lowShort],
+      [highShort, lowShort, weeklyOnly],
+      [highShort, weeklyOnly, lowShort],
+    ];
+
+    for (const candidates of permutations) {
+      const decision = selectAccount({
+        candidates,
+        config: defaultConfig,
+        now: NOW,
+      });
+      expect(decision.accountId).toBe("a");
+    }
+  });
+
   test("computes weekly remaining per hour", () => {
     expect(
       weeklyUrgency(
