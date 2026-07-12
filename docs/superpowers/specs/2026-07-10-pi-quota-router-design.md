@@ -333,7 +333,7 @@ Contains no credentials:
 - A reserved events array for schema compatibility; current diagnostics are written to `events.ndjson`.
 - Schema version.
 
-The version-one schema persists `usageSnapshots` for restart-safe cached quota state and reserves `events` for compatibility. Operational diagnostics are written to `events.ndjson`.
+Runtime state version two persists `usageSnapshots` for restart-safe cached quota state and permits a weekly-only snapshot. Strict version-one state is accepted and migrated losslessly in memory; the credential vault and config remain version one. Operational diagnostics are written to `events.ndjson`.
 
 ## Selection policy
 
@@ -342,7 +342,7 @@ The version-one schema persists `usageSnapshots` for restart-safe cached quota s
 For each account:
 
 - Freshness and fetch result.
-- 5-hour used percentage and reset time.
+- Reported 5-hour used percentage and reset time, when present.
 - Weekly used percentage and reset time.
 - Account availability, auth health, and cooldown.
 - Primer state.
@@ -359,7 +359,7 @@ An account is ineligible when:
 - Another live request owns its reservation.
 - Its usage is unknown or older than 24 hours.
 - Its weekly reset timestamp is missing or has elapsed without fresh post-reset usage.
-- Its remaining 5-hour quota is below 10%.
+- Its reported remaining 5-hour quota is below 10%.
 - Its remaining weekly quota is below 3%.
 - It is untouched without a weekly reset clock and has not been successfully primed.
 
@@ -382,7 +382,7 @@ Higher urgency wins because it represents more quota that must be spent per hour
 Candidates within 10% of the highest urgency are materially tied. If the last successfully completed routed account is in that band and passes all eligibility checks, retain it first to preserve prompt-cache affinity. A login display update or failed route does not change this history. Otherwise resolve the band in this order:
 
 1. Least weekly remaining quota that still passes the 3% headroom floor.
-2. Most 5-hour remaining quota.
+2. Most 5-hour remaining quota when both tied candidates report that window.
 3. Stable account id lexical order for deterministic behavior.
 
 This avoids account churn for negligible score improvements while keeping selection deterministic when the last successful account is not retained.
@@ -503,7 +503,7 @@ The footer shows:
 Codex · work@example · 5h 72% · 7d 41%/18h · urgent 0.023/h · auto
 ```
 
-The final field is `auto`, `manual`, or `login`; unknown cached usage or reset values render as `?`.
+The final field is `auto`, `manual`, or `login`; unknown cached usage or reset values render as `?`, while an unreported five-hour limit renders as `5h n/a`.
 
 ## Persistence and security
 
