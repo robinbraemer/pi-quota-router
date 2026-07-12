@@ -54,6 +54,29 @@ describe("quota-aware selection", () => {
     );
   });
 
+  test("routes a weekly-only account without inventing short headroom", () => {
+    const decision = selectAccount({
+      candidates: [
+        candidate("weekly-only", NOW, {
+          shortWindow: false,
+          weeklyRemaining: 97,
+          resetHours: 168,
+        }),
+      ],
+      config: defaultConfig,
+      now: NOW,
+    });
+
+    expect(decision.accountId).toBe("weekly-only");
+    expect(decision.candidates[0]).toEqual(
+      expect.objectContaining({
+        eligible: true,
+        weeklyRemainingPercent: 97,
+      }),
+    );
+    expect(decision.candidates[0]?.shortWindowRemainingPercent).toBeUndefined();
+  });
+
   test("uses fresh candidates before penalized stale fallback data", () => {
     const decision = selectAccount({
       candidates: [
@@ -238,6 +261,29 @@ describe("quota-aware selection", () => {
       now: NOW,
     });
     expect(lexical.accountId).toBe("a");
+  });
+
+  test("uses stable ids for mixed short-window ties regardless of input order", () => {
+    const lowShort = candidate("a", NOW, { shortRemaining: 70 });
+    const weeklyOnly = candidate("b", NOW, { shortWindow: false });
+    const highShort = candidate("c", NOW, { shortRemaining: 80 });
+    const permutations = [
+      [lowShort, weeklyOnly, highShort],
+      [lowShort, highShort, weeklyOnly],
+      [weeklyOnly, lowShort, highShort],
+      [weeklyOnly, highShort, lowShort],
+      [highShort, lowShort, weeklyOnly],
+      [highShort, weeklyOnly, lowShort],
+    ];
+
+    for (const candidates of permutations) {
+      const decision = selectAccount({
+        candidates,
+        config: defaultConfig,
+        now: NOW,
+      });
+      expect(decision.accountId).toBe("a");
+    }
   });
 
   test("computes weekly remaining per hour", () => {

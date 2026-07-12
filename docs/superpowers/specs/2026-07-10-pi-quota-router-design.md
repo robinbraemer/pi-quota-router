@@ -28,7 +28,7 @@ The router does not merely choose the lowest usage percentage. It:
 - Route automatically among equivalent Codex OAuth accounts.
 - Optimize effective usable quota over time rather than evenly balancing percentages.
 - Support one-shot priming when the operator explicitly confirms both quota spend and first-use rolling-window behavior for that invocation.
-- Avoid starting work on an account that lacks conservative 5-hour or weekly headroom.
+- Avoid starting work below conservative weekly headroom or, when reported, 5-hour headroom.
 - Keep routing deterministic, explainable, observable, abortable, and safe under multiple Pi processes.
 - Recover transparently from pre-output quota, authentication, and token-refresh failures.
 - Provide a coherent `/quota-router` command family and a compact footer.
@@ -237,7 +237,7 @@ The provider override is the only component coupled to Pi's streaming types. Sel
 
 ### `src/status/status-controller.ts`
 
-- Renders a compact footer with active account, 5-hour remaining, weekly remaining, reset countdown, urgency, and routing mode.
+- Renders a compact footer with active account, reported 5-hour remaining or `n/a`, weekly remaining, reset countdown, urgency, and routing mode.
 - Uses cached data without triggering a usage refresh.
 - Keeps rendering independent from routing success.
 
@@ -333,7 +333,7 @@ Contains no credentials:
 - A reserved events array for schema compatibility; current diagnostics are written to `events.ndjson`.
 - Schema version.
 
-The version-one schema persists `usageSnapshots` for restart-safe cached quota state and reserves `events` for compatibility. Operational diagnostics are written to `events.ndjson`.
+Runtime state version two persists `usageSnapshots` for restart-safe cached quota state and permits a weekly-only snapshot. Strict version-one state is accepted and migrated losslessly in memory; the credential vault and config remain version one. Operational diagnostics are written to `events.ndjson`.
 
 ## Selection policy
 
@@ -342,7 +342,7 @@ The version-one schema persists `usageSnapshots` for restart-safe cached quota s
 For each account:
 
 - Freshness and fetch result.
-- 5-hour used percentage and reset time.
+- Reported 5-hour used percentage and reset time, when present.
 - Weekly used percentage and reset time.
 - Account availability, auth health, and cooldown.
 - Primer state.
@@ -359,7 +359,7 @@ An account is ineligible when:
 - Another live request owns its reservation.
 - Its usage is unknown or older than 24 hours.
 - Its weekly reset timestamp is missing or has elapsed without fresh post-reset usage.
-- Its remaining 5-hour quota is below 10%.
+- Its reported remaining 5-hour quota is below 10%.
 - Its remaining weekly quota is below 3%.
 - It is untouched without a weekly reset clock and has not been successfully primed.
 
@@ -382,7 +382,7 @@ Higher urgency wins because it represents more quota that must be spent per hour
 Candidates within 10% of the highest urgency are materially tied. If the last successfully completed routed account is in that band and passes all eligibility checks, retain it first to preserve prompt-cache affinity. A login display update or failed route does not change this history. Otherwise resolve the band in this order:
 
 1. Least weekly remaining quota that still passes the 3% headroom floor.
-2. Most 5-hour remaining quota.
+2. Most 5-hour remaining quota when both tied candidates report that window.
 3. Stable account id lexical order for deterministic behavior.
 
 This avoids account churn for negligible score improvements while keeping selection deterministic when the last successful account is not retained.
@@ -403,7 +403,7 @@ Priming is intentional quota spend, not quota inspection.
 
 An account is a priming candidate only when a fresh usage snapshot shows:
 
-- 0% used in both active windows.
+- 0% used in both a reported 5-hour window and the weekly window.
 - No observed weekly reset timestamp.
 - Healthy authentication.
 - No cooldown, reservation, or prior successful primer.
@@ -503,7 +503,7 @@ The footer shows:
 Codex · work@example · 5h 72% · 7d 41%/18h · urgent 0.023/h · auto
 ```
 
-The final field is `auto`, `manual`, or `login`; unknown cached usage or reset values render as `?`.
+The final field is `auto`, `manual`, or `login`; unknown cached usage or reset values render as `?`, while an unreported five-hour limit renders as `5h n/a`.
 
 ## Persistence and security
 
@@ -528,7 +528,7 @@ Each atomic selection persists a credential-free `lastSelection` explanation in 
 
 - Near-reset high remaining quota beats lower remaining quota with a distant reset.
 - Similar urgency drains the least weekly remaining account.
-- Short-window headroom vetoes a weekly winner.
+- Reported short-window headroom vetoes a weekly winner.
 - Manual selection wins while healthy.
 - Stale data is penalized and fresh data wins.
 - Untouched/no-clock accounts are excluded until primed or manually selected.
@@ -623,7 +623,7 @@ A release is blocked unless:
 - High remaining quota near reset is spent before less urgent quota.
 - Similar-urgency accounts drain the least weekly remaining safe account.
 - Synthetic primer spend occurs only after explicit confirmation and is verified from fresh usage.
-- No task starts below the configured 5-hour or weekly headroom floor unless manually forced.
+- No task starts below the configured weekly headroom floor or a reported 5-hour headroom floor unless manually forced.
 - Parallel Pi processes do not select the same free account concurrently.
 - Token refresh races cannot burn a rotating refresh token.
 - Failover before output is transparent; failover after output never replays.

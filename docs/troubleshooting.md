@@ -18,6 +18,7 @@ Start with:
 | `invalid` | Close peer Pi processes, use `/quota-router path`, preserve a copy of the directory, and inspect JSON syntax/schema. Do not overwrite `accounts.json` unless you are prepared to reauthenticate. |
 | Footer ends in `login` | No account has completed login; run `/quota-router login`. |
 | Footer contains `?` | Run `/quota-router refresh all`; the weekly clock may genuinely be absent on an untouched account. |
+| Footer contains `5h n/a` | The provider reported a duration-tagged weekly limit but no five-hour limit. This is valid; automatic routing uses weekly urgency and skips only the short-window floor. |
 | Account says `reauth required` | Run `/quota-router login <label>` and sign in with that Codex identity. A successful duplicate login replaces the saved credentials and label, then clears its authentication block. |
 | Browser or clipboard authorization action fails | Use the authorization URL shown in the warning as a manual fallback. |
 | `Unexpected Codex authorization URL` | Update normal Pi and retry. The router rejected an OAuth URL that did not match the fixed OpenAI client, callback, state, and PKCE contract, and saved no credentials. |
@@ -44,10 +45,10 @@ Start with:
 | `AccountNeedsReauthError` | Credentials were revoked, returned `invalid_grant`, changed identity, or were already invalidated. | Login that account again. It remains excluded until then. |
 | `TokenRefreshTransientError` | Refresh had a network/shape failure or could not obtain the refresh lock within five seconds. | Check networking and peer Pi processes, then retry. Do not delete the account. |
 | `AccountNotFoundError` | A command referenced a removed/unknown managed id. | Run `/quota-router list` and use the current id or label. |
-| `StoreValidationError` | Persisted JSON is malformed or violates the version-one schema. | Back up the router directory, repair the file using the documented schema, or move only non-credential config/state aside for recreation. |
+| `StoreValidationError` | Persisted JSON is malformed or violates its versioned schema. | Back up the router directory, repair the file using the documented schema, or move only non-credential config/state aside for recreation. Runtime state v1 migrates to v2; credentials/config remain v1. |
 | `StoreLockTimeoutError` | A JSON state lock remained contended for five seconds. | Wait for peer work; check for a stuck Pi process. Reset reservations only after confirming no peer is active. |
 | `ReservationLostError` | An active request's persisted lease disappeared or could not be renewed. | Retry the turn after checking peer processes. Do not reset reservations while any Pi process is active. |
-| `CodexUsageParseError` | The usage endpoint returned an unsupported body. | Update Pi Quota Router; preserve a redacted response shape if filing an issue. Never post headers/tokens. |
+| `CodexUsageParseError` | The usage endpoint returned an unsupported body, duplicate semantic window, or explicit duration other than five hours/seven days. | Update Pi Quota Router; preserve a redacted response shape and duration fields if filing an issue. Never post headers/tokens. |
 | `CodexUsageHttpError` | Usage returned HTTP failure, timed out, or did not complete. | Check connectivity/authentication, run `refresh all`, and retry. Last-good data can be used conservatively for up to 24 hours. |
 | `RouteUnavailableError` | Fresh selection found no eligible automatic account or the manual account was unavailable. The stream closes immediately with one of the actionable messages above. | Resolve quota, usage-data, health, block, or reservation state and start a new turn. |
 | `CommandParseError` | Unknown command, too many args, invalid reset/log option, or unsafe selector. | Use the command table in the README and quote labels containing spaces. |

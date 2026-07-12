@@ -277,6 +277,7 @@ export async function createRouterController(
             ...(block ? { block } : {}),
             untouched:
               snapshot !== undefined &&
+              snapshot.shortWindow !== undefined &&
               snapshot.shortWindow.usedPercent === 0 &&
               snapshot.weeklyWindow?.usedPercent === 0 &&
               snapshot.weeklyWindow.resetsAt === undefined &&
@@ -425,7 +426,9 @@ export async function createRouterController(
             const snapshot = usage.peek(account.id);
             const quota = snapshot
               ? [
-                  `5h ${remainingPercent(snapshot.shortWindow.usedPercent)}% remaining`,
+                  snapshot.shortWindow
+                    ? `5h ${remainingPercent(snapshot.shortWindow.usedPercent)}% remaining`
+                    : "5h n/a",
                   snapshot.weeklyWindow
                     ? `7d ${remainingPercent(snapshot.weeklyWindow.usedPercent)}% remaining`
                     : "7d quota unknown",

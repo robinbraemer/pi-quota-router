@@ -40,7 +40,7 @@ export interface UsageWindow {
 export interface UsageSnapshot {
   accountId: string;
   observedAt: number;
-  shortWindow: UsageWindow;
+  shortWindow?: UsageWindow | undefined;
   weeklyWindow?: UsageWindow | undefined;
   stale: boolean;
   planType?: string | undefined;

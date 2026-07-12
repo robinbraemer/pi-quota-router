@@ -2,7 +2,7 @@
 
 Pi Quota Router is a normal-Pi extension for several equivalent ChatGPT Codex accounts. It keeps the selected `openai-codex` model and thinking level unchanged, but chooses the account whose useful weekly quota is most urgent to spend.
 
-It refreshes 5-hour and weekly usage before automatic selection, reserves accounts across concurrent Pi processes, refreshes OAuth tokens under a cross-process lock, and can fail over only before model-visible output. Optional one-shot priming can start an untouched account's weekly reset clock, but only after two explicit confirmations for that request.
+It refreshes reported 5-hour and weekly usage before automatic selection, classifies provider windows by their explicit duration, reserves accounts across concurrent Pi processes, refreshes OAuth tokens under a cross-process lock, and can fail over only before model-visible output. Optional one-shot priming can start an untouched account's weekly reset clock, but only after two explicit confirmations for that request.
 
 ## Install from GitHub
 
@@ -45,7 +45,7 @@ After at least one account has a weekly reset timestamp, ordinary Codex prompts 
 
 ## How automatic selection works
 
-An account must first be healthy and usable. Automatic routing excludes accounts that need reauthentication, are blocked or reserved, lack usable quota data, are more than 24 hours stale, have less than 10% 5-hour headroom, have less than 3% weekly headroom, or are untouched without an observed weekly clock.
+An account must first be healthy and usable. Automatic routing excludes accounts that need reauthentication, are blocked or reserved, lack usable quota data, are more than 24 hours stale, have less than 10% headroom in a reported 5-hour window, have less than 3% weekly headroom, or are untouched without an observed weekly clock. A provider may report only a duration-tagged weekly window; that account remains eligible and no 5-hour limit is invented.
 
 For each eligible account:
 
@@ -64,7 +64,7 @@ The highest urgency wins. For example:
 
 `work` is selected because much more useful quota will expire per hour. This intentionally drains expiring quota instead of equalizing percentages. Equalizing can preserve a neat balance while allowing a large near-reset allowance to disappear unused.
 
-Scores within 10% are treated as tied. The router retains the eligible account that last completed a routed request within that band; a login display update or failed route does not receive this preference. Otherwise it prefers the least weekly quota remaining, then the most 5-hour quota remaining, then the stable managed account id. See [the exact policy](docs/policy.md).
+Scores within 10% are treated as tied. The router retains the eligible account that last completed a routed request within that band; a login display update or failed route does not receive this preference. Otherwise it prefers the least weekly quota remaining, then the most 5-hour quota remaining when both tied accounts report that window, then the stable managed account id. See [the exact policy](docs/policy.md).
 
 If fresh selection finds no eligible account, the foreground turn ends immediately with an actionable error. The router does not keep an old turn open waiting for quota or account health to recover; retrying later starts a new selection pass and can use any account that has recovered. Replay-safe failover among currently eligible accounts still occurs before model-visible output.
 
@@ -120,6 +120,7 @@ Codex · work · 5h 72% · 7d 41%/18h · urgent 0.023/h · auto
 
 - `work`: active account label.
 - `5h 72%`: short-window quota remaining.
+- `5h n/a`: the provider reported no five-hour limit; no short-window headroom is fabricated.
 - `7d 41%/18h`: weekly quota remaining and time until reset.
 - `urgent 0.023/h`: remaining weekly fraction per hour until reset.
 - `auto`, `manual`, or `login`: routing mode.
@@ -141,6 +142,8 @@ By default, data lives in `~/.pi/agent/pi-quota-router/`. If `PI_CODING_AGENT_DI
 The containing directory is `0700`. Same-directory temporary files, lock targets, and the single rotated `events.ndjson.1` predecessor are also private. Details and threat limits are in [Security](docs/security.md).
 
 Cached usage snapshots survive Pi restarts. The router reuses them while fresh, can fall back to them conservatively for up to 24 hours after a fetch failure, and refreshes them when their freshness or recorded reset time expires.
+
+Runtime `state.json` is version 2 and accepts/migrates version-one state. Version two permits a real weekly-only snapshot. Because state is credential-free and rebuildable, rolling back to an older extension requires recreating only `state.json`; `accounts.json` and `config.json` remain version one and must be preserved.
 
 Version-one config files retain `maxRecoveryWaitMs` as a reserved compatibility field. It no longer affects foreground routing and must remain present only so existing strict config files and older rollback versions stay readable.
 

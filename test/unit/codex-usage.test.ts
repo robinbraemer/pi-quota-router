@@ -5,7 +5,12 @@ import {
   fetchCodexUsage,
   parseCodexUsage,
 } from "../../src/usage/codex-usage.ts";
-import { completeUsageResponse, primaryOnlyUsageResponse } from "../fixtures/usage-responses.ts";
+import {
+  completeUsageResponse,
+  primaryOnlyUsageResponse,
+  reversedDurationUsageResponse,
+  weeklyOnlyPrimaryUsageResponse,
+} from "../fixtures/usage-responses.ts";
 
 describe("Codex usage", () => {
   test("parses active windows and normalizes reset units", () => {
@@ -24,7 +29,92 @@ describe("Codex usage", () => {
   test("preserves a missing weekly window instead of inventing one", () => {
     const snapshot = parseCodexUsage(primaryOnlyUsageResponse, 1, "codex-a");
     expect(snapshot.weeklyWindow).toBeUndefined();
-    expect(snapshot.shortWindow.usedPercent).toBe(0);
+    expect(snapshot.shortWindow?.usedPercent).toBe(0);
+  });
+
+  test("classifies a duration-tagged primary weekly window without inventing short quota", () => {
+    const snapshot = parseCodexUsage(weeklyOnlyPrimaryUsageResponse, 2_000_000_000_000, "codex-a");
+
+    expect(snapshot.shortWindow).toBeUndefined();
+    expect(snapshot.weeklyWindow).toEqual({
+      usedPercent: 3,
+      resetsAt: 2_000_604_800_000,
+    });
+  });
+
+  test("uses recognized durations instead of primary and secondary position", () => {
+    const snapshot = parseCodexUsage(reversedDurationUsageResponse, 2_000_000_000_000, "codex-a");
+
+    expect(snapshot.shortWindow).toEqual({
+      usedPercent: 10,
+      resetsAt: 2_000_018_000_000,
+    });
+    expect(snapshot.weeklyWindow).toEqual({
+      usedPercent: 30,
+      resetsAt: 2_000_604_800_000,
+    });
+  });
+
+  test("accepts camel-case RPC-compatible window metadata", () => {
+    const snapshot = parseCodexUsage(
+      {
+        rate_limit: {
+          primary_window: {
+            usedPercent: 4,
+            resetsAt: 2_000_604_800_000,
+            windowDurationMins: 10_080,
+          },
+        },
+      },
+      2_000_000_000_000,
+      "codex-a",
+    );
+
+    expect(snapshot).toEqual({
+      accountId: "codex-a",
+      observedAt: 2_000_000_000_000,
+      weeklyWindow: { usedPercent: 4, resetsAt: 2_000_604_800_000 },
+      stale: false,
+    });
+  });
+
+  test("rejects unknown explicit durations and duplicate recognized kinds", () => {
+    expect(() =>
+      parseCodexUsage(
+        {
+          rate_limit: {
+            primary_window: {
+              used_percent: 1,
+              reset_at: 2_000_001_000,
+              limit_window_seconds: 1_000,
+            },
+          },
+        },
+        1,
+        "codex-a",
+      ),
+    ).toThrow(CodexUsageParseError);
+
+    expect(() =>
+      parseCodexUsage(
+        {
+          rate_limit: {
+            primary_window: {
+              used_percent: 1,
+              reset_at: 2_000_604_800,
+              limit_window_seconds: 604_800,
+            },
+            secondary_window: {
+              used_percent: 2,
+              reset_at: 2_000_604_900,
+              limit_window_seconds: 604_800,
+            },
+          },
+        },
+        1,
+        "codex-a",
+      ),
+    ).toThrow(CodexUsageParseError);
   });
 
   test("clamps percentages and rejects a missing primary window", () => {
@@ -38,7 +128,7 @@ describe("Codex usage", () => {
       1,
       "codex-a",
     );
-    expect(snapshot.shortWindow.usedPercent).toBe(100);
+    expect(snapshot.shortWindow?.usedPercent).toBe(100);
     expect(snapshot.weeklyWindow?.usedPercent).toBe(0);
     expect(() => parseCodexUsage({}, 1, "codex-a")).toThrow(CodexUsageParseError);
   });

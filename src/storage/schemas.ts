@@ -28,17 +28,32 @@ const UsageWindowSchema = z
   })
   .strict();
 
-const UsageSnapshotSchema = z
+const UsageSnapshotBaseShape = {
+  accountId: z.string().min(1),
+  observedAt: z.number().int().nonnegative(),
+  stale: z.boolean(),
+  planType: z.string().optional(),
+  creditsRemaining: z.number().nonnegative().optional(),
+};
+
+const UsageSnapshotV1Schema = z
   .object({
-    accountId: z.string().min(1),
-    observedAt: z.number().int().nonnegative(),
+    ...UsageSnapshotBaseShape,
     shortWindow: UsageWindowSchema,
     weeklyWindow: UsageWindowSchema.optional(),
-    stale: z.boolean(),
-    planType: z.string().optional(),
-    creditsRemaining: z.number().nonnegative().optional(),
   })
   .strict();
+
+const UsageSnapshotV2Schema = z
+  .object({
+    ...UsageSnapshotBaseShape,
+    shortWindow: UsageWindowSchema.optional(),
+    weeklyWindow: UsageWindowSchema.optional(),
+  })
+  .strict()
+  .refine((snapshot) => snapshot.shortWindow !== undefined || snapshot.weeklyWindow !== undefined, {
+    message: "At least one Codex usage window is required",
+  });
 
 const AccountBlockSchema = z
   .object({
@@ -143,28 +158,44 @@ export const RouterConfigSchema = z
   })
   .strict();
 
-export const RuntimeStateFileSchema = z
+const RuntimeStateBaseShape = {
+  blocks: z.array(AccountBlockSchema),
+  reservations: z.array(ReservationSchema),
+  priming: z
+    .object({
+      confirmedAccountIds: z.array(z.string()),
+      retryAfter: z.record(z.string(), z.number().int().nonnegative()),
+    })
+    .strict(),
+  lastSelection: SelectionDecisionSchema.optional(),
+  events: z.array(RoutingEventSchema),
+};
+
+const RuntimeStateFileV1Schema = z
   .object({
     version: z.literal(1),
-    usageSnapshots: z.array(UsageSnapshotSchema),
-    blocks: z.array(AccountBlockSchema),
-    reservations: z.array(ReservationSchema),
-    priming: z
-      .object({
-        confirmedAccountIds: z.array(z.string()),
-        retryAfter: z.record(z.string(), z.number().int().nonnegative()),
-      })
-      .strict(),
-    lastSelection: SelectionDecisionSchema.optional(),
-    events: z.array(RoutingEventSchema),
+    usageSnapshots: z.array(UsageSnapshotV1Schema),
+    ...RuntimeStateBaseShape,
   })
   .strict();
 
+const RuntimeStateFileV2Schema = z
+  .object({
+    version: z.literal(2),
+    usageSnapshots: z.array(UsageSnapshotV2Schema),
+    ...RuntimeStateBaseShape,
+  })
+  .strict();
+
+export const RuntimeStateFileSchema = z
+  .union([RuntimeStateFileV1Schema, RuntimeStateFileV2Schema])
+  .transform((state) => (state.version === 2 ? state : { ...state, version: 2 as const }));
+
 export type AccountVaultFile = z.infer<typeof AccountVaultFileSchema>;
-export type RuntimeStateFile = z.infer<typeof RuntimeStateFileSchema>;
+export type RuntimeStateFile = z.output<typeof RuntimeStateFileSchema>;
 
 export const defaultRuntimeState: RuntimeStateFile = {
-  version: 1,
+  version: 2,
   usageSnapshots: [],
   blocks: [],
   reservations: [],

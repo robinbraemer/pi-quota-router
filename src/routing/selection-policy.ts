@@ -20,7 +20,7 @@ interface RankedCandidate {
   candidate: Candidate;
   explanation: CandidateExplanation;
   weeklyRemaining: number;
-  shortRemaining: number;
+  shortRemaining?: number;
   urgency: number;
   freshness: "fresh" | "stale";
 }
@@ -80,17 +80,24 @@ export function selectAccount(input: SelectionInput): SelectionDecision {
     }
   }
 
-  const tied = tier
-    .filter((value) => value.ranked.urgency >= threshold)
-    .sort((left, right) => {
-      if (left.ranked.weeklyRemaining !== right.ranked.weeklyRemaining) {
-        return left.ranked.weeklyRemaining - right.ranked.weeklyRemaining;
-      }
-      if (left.ranked.shortRemaining !== right.ranked.shortRemaining) {
-        return right.ranked.shortRemaining - left.ranked.shortRemaining;
-      }
-      return left.ranked.candidate.accountId.localeCompare(right.ranked.candidate.accountId);
-    });
+  const tied = tier.filter((value) => value.ranked.urgency >= threshold);
+  const useShortWindowTieBreak = tied.every((value) => value.ranked.shortRemaining !== undefined);
+  tied.sort((left, right) => {
+    if (left.ranked.weeklyRemaining !== right.ranked.weeklyRemaining) {
+      return left.ranked.weeklyRemaining - right.ranked.weeklyRemaining;
+    }
+    const leftShortRemaining = left.ranked.shortRemaining;
+    const rightShortRemaining = right.ranked.shortRemaining;
+    if (
+      useShortWindowTieBreak &&
+      leftShortRemaining !== undefined &&
+      rightShortRemaining !== undefined &&
+      leftShortRemaining !== rightShortRemaining
+    ) {
+      return rightShortRemaining - leftShortRemaining;
+    }
+    return left.ranked.candidate.accountId.localeCompare(right.ranked.candidate.accountId);
+  });
   const selected = tied[0];
   if (!selected) {
     return { reason: "no_eligible_accounts", candidates: explanations };
@@ -152,12 +159,17 @@ function evaluate(
   }
 
   const penalty = freshness === "stale" ? STALE_PENALTY_PERCENT : 0;
-  const shortRemaining = Math.max(0, 100 - candidate.usage.shortWindow.usedPercent - penalty);
+  const shortRemaining = candidate.usage.shortWindow
+    ? Math.max(0, 100 - candidate.usage.shortWindow.usedPercent - penalty)
+    : undefined;
   const weeklyRemaining = Math.max(0, 100 - weekly.usedPercent - penalty);
-  if (shortRemaining < input.config.headroom.shortWindowMinimumPercent) {
+  if (
+    shortRemaining !== undefined &&
+    shortRemaining < input.config.headroom.shortWindowMinimumPercent
+  ) {
     return {
       explanation: reject(candidate, freshness, "short_headroom", {
-        shortWindowRemainingPercent: shortRemaining,
+        ...(shortRemaining !== undefined ? { shortWindowRemainingPercent: shortRemaining } : {}),
         weeklyRemainingPercent: weeklyRemaining,
       }),
     };
@@ -165,7 +177,7 @@ function evaluate(
   if (weeklyRemaining < input.config.headroom.weeklyMinimumPercent) {
     return {
       explanation: reject(candidate, freshness, "weekly_headroom", {
-        shortWindowRemainingPercent: shortRemaining,
+        ...(shortRemaining !== undefined ? { shortWindowRemainingPercent: shortRemaining } : {}),
         weeklyRemainingPercent: weeklyRemaining,
       }),
     };
@@ -177,7 +189,7 @@ function evaluate(
     accountId: candidate.accountId,
     eligible: true,
     weeklyRemainingPercent: weeklyRemaining,
-    shortWindowRemainingPercent: shortRemaining,
+    ...(shortRemaining !== undefined ? { shortWindowRemainingPercent: shortRemaining } : {}),
     urgency,
     freshness,
   };
@@ -187,7 +199,7 @@ function evaluate(
       candidate,
       explanation,
       weeklyRemaining,
-      shortRemaining,
+      ...(shortRemaining !== undefined ? { shortRemaining } : {}),
       urgency,
       freshness,
     },

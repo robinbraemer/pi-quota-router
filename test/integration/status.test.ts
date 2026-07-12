@@ -23,6 +23,23 @@ describe("quota router status", () => {
     ).toBe("Codex · work · 5h 72% · 7d 41%/18h · urgent 0.023/h · auto");
   });
 
+  test("renders an absent short limit as not applicable", () => {
+    expect(
+      formatCompactStatus({
+        label: "work",
+        snapshot: {
+          accountId: "a",
+          observedAt: NOW,
+          weeklyWindow: { usedPercent: 3, resetsAt: NOW + 7 * 24 * 3_600_000 },
+          stale: false,
+        },
+        urgency: 0.006,
+        mode: "auto",
+        now: NOW,
+      }),
+    ).toBe("Codex · work · 5h n/a · 7d 97%/7d · urgent 0.006/h · auto");
+  });
+
   test("renders only cached state through Pi setStatus", () => {
     const values: Array<string | undefined> = [];
     let reads = 0;

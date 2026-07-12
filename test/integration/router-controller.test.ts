@@ -27,7 +27,10 @@ import type { RouterConfig } from "../../src/types.ts";
 import { makeCredentials } from "../fixtures/oauth.ts";
 import { eventStream, message, successfulText } from "../fixtures/provider-streams.ts";
 import { createStorageFixture } from "../fixtures/storage.ts";
-import { completeUsageResponse } from "../fixtures/usage-responses.ts";
+import {
+  completeUsageResponse,
+  weeklyOnlyPrimaryUsageResponse,
+} from "../fixtures/usage-responses.ts";
 
 const AUTHORIZATION_URL = `https://auth.openai.com/oauth/authorize?response_type=code&client_id=app_EMoamEEZ73f0CkXaXp7hrann&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback&code_challenge=${"a".repeat(43)}&code_challenge_method=S256&state=oauth-state`;
 const cleanups: Array<() => Promise<void>> = [];
@@ -1181,6 +1184,35 @@ describe("RouterController", () => {
     expect(await controller.operations.dashboard()).toContain("work");
     expect(await controller.operations.verify()).toContain("healthy");
     expect(await controller.operations.paths()).toContain("accounts.json");
+    await controller.shutdown();
+  });
+
+  test("routes and lists an account with only a duration-tagged weekly window", async () => {
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    let backendKey: string | undefined;
+    const controller = await createRouterController({
+      paths: resolveRouterPaths(fixture.directory),
+      clock: () => 2_000_000_000_000,
+      oauth: { refresh: async () => makeCredentials("account-1", 3_000_000_000_000) },
+      fetchImpl: async () => Response.json(weeklyOnlyPrimaryUsageResponse),
+      baseStream: (_model, _context, options) => {
+        backendKey = options?.apiKey;
+        return eventStream(successfulText());
+      },
+    });
+    await controller.vault.addFromOAuth(
+      "weekly-only",
+      makeCredentials("account-1", 3_000_000_000_000),
+    );
+
+    const events = await collectController(controller);
+    const list = await controller.operations.list();
+
+    expect(events.at(-1)?.type).toBe("done");
+    expect(backendKey).toContain(".");
+    expect(list).toContain("5h n/a");
+    expect(list).toContain("7d 97% remaining");
     await controller.shutdown();
   });
 
