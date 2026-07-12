@@ -82,8 +82,6 @@ function dependencies(accounts: string[], baseStream: RoutedStreamDependencies["
       renewed.push(leaseToken);
       return true;
     },
-    recoveryDeadline: () => 2_000_021_600_000,
-    waitForRecovery: async () => undefined,
     maxAttempts: () => 5,
   };
   return { value, selected, released, recorded, renewed, succeeded };
@@ -313,53 +311,44 @@ describe("RoutedStream", () => {
     expect(setup.recorded).toEqual(["a"]);
   });
 
-  test("surfaces a non-recoverable selection decision without retrying", async () => {
-    const setup = dependencies([], () => eventStream(successfulText()));
-    let waits = 0;
-    setup.value.waitForRecovery = async () => {
-      waits += 1;
-    };
+  test("fails immediately when every account is temporarily unavailable", async () => {
+    const setup = dependencies(["a"], () => eventStream(successfulText()));
+    setup.value.selectAndReserve = async () => ({
+      kind: "unavailable",
+      reason: "no_eligible_accounts",
+      recoverableAccountIds: ["a"],
+      knownAccountIds: ["a"],
+    });
 
     const events = await collect(createRoutedStream(setup.value)(model, context));
 
     expect(events).toHaveLength(1);
     expect(events[0]?.type).toBe("error");
-    expect(waits).toBe(0);
+    if (events[0]?.type === "error") {
+      expect(events[0].error.errorMessage).toBe(
+        "No Codex account is currently eligible; quota, usage data, or account health must recover before retrying",
+      );
+    }
   });
 
-  test("reuses one recovery deadline across every wait in a routed request", async () => {
-    const setup = dependencies(["a"], () => eventStream(successfulText()));
-    let selections = 0;
-    let deadlines = 0;
-    const waitDeadlines: number[] = [];
-    setup.value.selectAndReserve = async () => {
-      selections += 1;
-      if (selections <= 2) {
-        return {
-          kind: "unavailable",
-          reason: "blocked",
-          recoverableAccountIds: ["a"],
-          knownAccountIds: ["a"],
-        };
-      }
-      return {
-        kind: "selected",
-        lease: { accountId: "a", leaseToken: "lease-a", reservationTtlMs: 120_000 },
-      };
-    };
-    setup.value.recoveryDeadline = () => {
-      deadlines += 1;
-      return 2_000_021_600_000;
-    };
-    setup.value.waitForRecovery = async (_accountIds, _knownAccountIds, deadline) => {
-      waitDeadlines.push(deadline);
-    };
+  test("reports an unavailable manual account distinctly", async () => {
+    const setup = dependencies([], () => eventStream(successfulText()));
+    setup.value.selectAndReserve = async () => ({
+      kind: "unavailable",
+      reason: "manual_account_unavailable",
+      recoverableAccountIds: [],
+      knownAccountIds: ["a"],
+    });
 
     const events = await collect(createRoutedStream(setup.value)(model, context));
+    const terminal = events[0];
 
-    expect(events.at(-1)?.type).toBe("done");
-    expect(deadlines).toBe(1);
-    expect(waitDeadlines).toEqual([2_000_021_600_000, 2_000_021_600_000]);
+    expect(terminal?.type).toBe("error");
+    if (terminal?.type === "error") {
+      expect(terminal.error.errorMessage).toBe(
+        "The selected Codex account is currently unavailable",
+      );
+    }
   });
 
   test("renews a lease while a request remains active", async () => {

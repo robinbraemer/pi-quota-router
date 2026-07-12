@@ -20,7 +20,6 @@ import {
   blockFromUsage,
   reconcileUsageBlock,
 } from "./recovery/recovery-state.ts";
-import { waitForRecovery } from "./recovery/wait-for-recovery.ts";
 import { createReservationStore } from "./routing/reservation-store.ts";
 import { selectAndReserve } from "./routing/select-and-reserve.ts";
 import { weeklyUrgency } from "./routing/selection-policy.ts";
@@ -373,17 +372,6 @@ export async function createRouterController(
     },
     release: (leaseToken) => reservations.release(leaseToken).then(() => undefined),
     renew: (leaseToken, ttlMs) => reservations.renew(leaseToken, clock(), ttlMs),
-    recoveryDeadline: () => clock() + cachedConfig.maxRecoveryWaitMs,
-    waitForRecovery: (accountIds, knownAccountIds, deadline, signal) =>
-      waitForRecovery({
-        stateStore,
-        clock,
-        accountIds,
-        knownAccountIds,
-        listAccountIds: async () => (await vault.list()).map((account) => account.id),
-        deadline,
-        ...(signal ? { signal } : {}),
-      }),
     maxAttempts: () => cachedConfig.maxRotationAttempts,
   });
 

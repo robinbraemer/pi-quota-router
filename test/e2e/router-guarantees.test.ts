@@ -444,7 +444,7 @@ describe("quota router end-to-end guarantees", () => {
     await controller.shutdown();
   });
 
-  test("Ctrl-C aborts an all-limited recovery wait", async () => {
+  test("Ctrl-C aborts the standalone recovery helper", async () => {
     const fixture = await createStorageFixture();
     cleanups.push(fixture.cleanup);
     const store = createAtomicJsonStore<RuntimeStateFile>({
@@ -648,16 +648,10 @@ describe("quota router end-to-end guarantees", () => {
         },
       ],
     }));
-    const primerAbort = new AbortController();
-    const primerResult = collect(
-      controller.routedStream(model, boundary.context, { signal: primerAbort.signal }),
+    const primerEvents = await collect(controller.routedStream(model, boundary.context));
+    expect(terminalErrorMessage(primerEvents)).toBe(
+      "The selected Codex account is currently unavailable",
     );
-    setTimeout(
-      () => primerAbort.abort(new Error(`primer cancelled ${boundary.providerPayload}`)),
-      5,
-    );
-    const primerEvents = await primerResult;
-    expect(terminalErrorMessage(primerEvents)).toBe("The Codex request was cancelled");
     captured.push(primerEvents);
     captured.push(await controller.operations.reset("reservations"));
     captured.push(await controller.operations.use("auto"));
@@ -815,8 +809,6 @@ function routedDependencies(baseStream: RoutedStreamDependencies["baseStream"]):
       recordSuccess: () => undefined,
       release: async () => undefined,
       renew: async () => true,
-      recoveryDeadline: () => NOW + defaultConfig.maxRecoveryWaitMs,
-      waitForRecovery: async () => undefined,
       maxAttempts: () => defaultConfig.maxRotationAttempts,
     },
   };

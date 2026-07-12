@@ -10,10 +10,6 @@ import {
 import type { FreshCredential } from "../accounts/account-vault.ts";
 import type { FailureClass } from "../recovery/failure-classifier.ts";
 import {
-  NoRecoverableAccountError,
-  RecoveryWaitTimeoutError,
-} from "../recovery/wait-for-recovery.ts";
-import {
   ReservationLostError,
   startReservationHeartbeat,
 } from "../routing/reservation-heartbeat.ts";
@@ -60,13 +56,6 @@ export interface RoutedStreamDependencies {
   recordSuccess(accountId: string, sessionId?: string): void;
   release(leaseToken: string): Promise<void>;
   renew(leaseToken: string, ttlMs: number): Promise<boolean>;
-  recoveryDeadline(): number;
-  waitForRecovery(
-    accountIds: readonly string[],
-    knownAccountIds: readonly string[],
-    deadline: number,
-    signal?: AbortSignal,
-  ): Promise<void>;
   maxAttempts(): number;
 }
 
@@ -74,7 +63,13 @@ class RouteUnavailableError extends Error {
   override readonly name = "RouteUnavailableError";
 
   constructor(reason: string) {
-    super(`No Codex account is available: ${reason}`);
+    super(
+      reason === "no_eligible_accounts"
+        ? "No Codex account is currently eligible; quota, usage data, or account health must recover before retrying"
+        : reason === "manual_account_unavailable"
+          ? "The selected Codex account is currently unavailable"
+          : `No Codex account is available: ${reason}`,
+    );
   }
 }
 
@@ -87,7 +82,6 @@ export function createRoutedStream(
     void (async () => {
       const excludedAccountIds = new Set<string>();
       let lastFailure: unknown;
-      let recoveryDeadline: number | undefined;
 
       for (let attempt = 0; attempt < dependencies.maxAttempts(); ) {
         options?.signal?.throwIfAborted();
@@ -98,19 +92,8 @@ export function createRoutedStream(
           ...(options ? { options } : {}),
         });
         if (selection.kind === "unavailable") {
-          if (selection.recoverableAccountIds.length === 0) {
-            lastFailure = new RouteUnavailableError(selection.reason);
-            break;
-          }
-          recoveryDeadline ??= dependencies.recoveryDeadline();
-          await dependencies.waitForRecovery(
-            selection.recoverableAccountIds,
-            selection.knownAccountIds,
-            recoveryDeadline,
-            options?.signal,
-          );
-          excludedAccountIds.clear();
-          continue;
+          lastFailure = new RouteUnavailableError(selection.reason);
+          break;
         }
 
         const { lease } = selection;
@@ -324,8 +307,7 @@ function sanitizedErrorMessage(reason: "aborted" | "error", error: unknown): str
   }
   if (
     error instanceof ReservationLostError ||
-    error instanceof RecoveryWaitTimeoutError ||
-    error instanceof NoRecoverableAccountError
+    error instanceof RouteUnavailableError
   ) {
     return error.message;
   }

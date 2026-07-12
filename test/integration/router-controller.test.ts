@@ -1353,7 +1353,7 @@ describe("RouterController", () => {
     await controller.shutdown();
   });
 
-  test("records fresh exhausted usage as a recoverable quota block", async () => {
+  test("records fresh exhausted usage as a quota block and fails promptly", async () => {
     const fixture = await createStorageFixture();
     cleanups.push(fixture.cleanup);
     const paths = resolveRouterPaths(fixture.directory);
@@ -1387,16 +1387,8 @@ describe("RouterController", () => {
       schema: RuntimeStateFileSchema,
       createDefault: () => structuredClone(defaultRuntimeState),
     });
-    const cancellation = new AbortController();
-    const routed = collectController(controller, { signal: cancellation.signal });
-
-    let block = (await stateStore.read()).blocks[0];
-    for (let attempt = 0; attempt < 50 && !block; attempt += 1) {
-      await Bun.sleep(2);
-      block = (await stateStore.read()).blocks[0];
-    }
-    cancellation.abort(new Error("stop recovery wait"));
-    const events = await routed;
+    const events = await collectController(controller);
+    const block = (await stateStore.read()).blocks[0];
 
     expect(block).toEqual({
       accountId: expect.any(String),
@@ -1408,7 +1400,10 @@ describe("RouterController", () => {
     expect(streamCalls).toBe(0);
     expect(events[0]?.type).toBe("error");
     if (events[0]?.type === "error") {
-      expect(events[0].reason).toBe("aborted");
+      expect(events[0].reason).toBe("error");
+      expect(events[0].error.errorMessage).toBe(
+        "No Codex account is currently eligible; quota, usage data, or account health must recover before retrying",
+      );
     }
     await controller.shutdown();
   });
@@ -1627,7 +1622,7 @@ describe("RouterController", () => {
     await controller.shutdown();
   });
 
-  test("uses the configured maximum recovery wait", async () => {
+  test("ignores the legacy recovery wait and fails a blocked foreground route promptly", async () => {
     const fixture = await createStorageFixture();
     cleanups.push(fixture.cleanup);
     const paths = resolveRouterPaths(fixture.directory);
@@ -1655,7 +1650,6 @@ describe("RouterController", () => {
       schema: RuntimeStateFileSchema,
       createDefault: () => structuredClone(defaultRuntimeState),
     });
-    await configStore.update((config) => ({ ...config, maxRecoveryWaitMs: 0 }));
     await stateStore.update((state) => ({
       ...state,
       blocks: [
@@ -1673,12 +1667,14 @@ describe("RouterController", () => {
 
     expect(events[0]?.type).toBe("error");
     if (events[0]?.type === "error") {
-      expect(events[0].error.errorMessage).toContain("configured wait limit");
+      expect(events[0].error.errorMessage).toBe(
+        "No Codex account is currently eligible; quota, usage data, or account health must recover before retrying",
+      );
     }
     await controller.shutdown();
   });
 
-  test("waits for recovery after every account fails in one request", async () => {
+  test("fails immediately after every account fails before output", async () => {
     const fixture = await createStorageFixture();
     cleanups.push(fixture.cleanup);
     const paths = resolveRouterPaths(fixture.directory);
@@ -1706,7 +1702,6 @@ describe("RouterController", () => {
     });
     await configStore.update((config) => ({
       ...config,
-      maxRecoveryWaitMs: 0,
       maxRotationAttempts: 3,
     }));
 
@@ -1715,7 +1710,9 @@ describe("RouterController", () => {
     expect(streamCalls).toBe(2);
     expect(events[0]?.type).toBe("error");
     if (events[0]?.type === "error") {
-      expect(events[0].error.errorMessage).toContain("configured wait limit");
+      expect(events[0].error.errorMessage).toBe(
+        "No Codex account is currently eligible; quota, usage data, or account health must recover before retrying",
+      );
     }
     await controller.shutdown();
   });
