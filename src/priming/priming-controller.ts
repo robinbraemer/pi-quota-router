@@ -241,6 +241,7 @@ export function createPrimingController(options: PrimingControllerOptions): Prim
 function isUntouchedCandidate(snapshot: UsageSnapshot): boolean {
   return (
     !snapshot.stale &&
+    snapshot.shortWindow !== undefined &&
     snapshot.shortWindow.usedPercent === 0 &&
     snapshot.weeklyWindow?.usedPercent === 0 &&
     snapshot.weeklyWindow.resetsAt === undefined

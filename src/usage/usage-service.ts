@@ -95,7 +95,7 @@ export function createUsageService(options: UsageServiceOptions): UsageService {
         !getOptions.force &&
         cached &&
         now - cached.observedAt < freshnessMs() + jitterMs(accountId) &&
-        (cached.shortWindow.resetsAt === undefined || cached.shortWindow.resetsAt > now) &&
+        (cached.shortWindow?.resetsAt === undefined || cached.shortWindow.resetsAt > now) &&
         (cached.weeklyWindow?.resetsAt === undefined || cached.weeklyWindow.resetsAt > now)
       ) {
         return cached;

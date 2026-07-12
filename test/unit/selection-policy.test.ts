@@ -54,6 +54,29 @@ describe("quota-aware selection", () => {
     );
   });
 
+  test("routes a weekly-only account without inventing short headroom", () => {
+    const decision = selectAccount({
+      candidates: [
+        candidate("weekly-only", NOW, {
+          shortWindow: false,
+          weeklyRemaining: 97,
+          resetHours: 168,
+        }),
+      ],
+      config: defaultConfig,
+      now: NOW,
+    });
+
+    expect(decision.accountId).toBe("weekly-only");
+    expect(decision.candidates[0]).toEqual(
+      expect.objectContaining({
+        eligible: true,
+        weeklyRemainingPercent: 97,
+      }),
+    );
+    expect(decision.candidates[0]?.shortWindowRemainingPercent).toBeUndefined();
+  });
+
   test("uses fresh candidates before penalized stale fallback data", () => {
     const decision = selectAccount({
       candidates: [

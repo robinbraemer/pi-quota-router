@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { blockFromFailure, reconcileUsageBlock } from "../../src/recovery/recovery-state.ts";
+import {
+  blockFromFailure,
+  blockFromUsage,
+  reconcileUsageBlock,
+} from "../../src/recovery/recovery-state.ts";
 import type { UsageSnapshot } from "../../src/types.ts";
 
 const NOW = 2_000_000_000_000;
@@ -34,6 +38,27 @@ describe("recovery state", () => {
   test("uses a one-hour estimate when no reset is reliable", () => {
     const block = blockFromFailure("a", { kind: "quota" }, undefined, NOW);
     expect(block).toEqual(expect.objectContaining({ retryAt: NOW + 3_600_000, estimated: true }));
+  });
+
+  test("derives a quota block from an exhausted weekly-only window", () => {
+    expect(
+      blockFromUsage(
+        "a",
+        {
+          accountId: "a",
+          observedAt: NOW,
+          weeklyWindow: { usedPercent: 100, resetsAt: NOW + 604_800_000 },
+          stale: false,
+        },
+        NOW,
+      ),
+    ).toEqual({
+      accountId: "a",
+      kind: "quota",
+      blockedAt: NOW,
+      retryAt: NOW + 604_800_000,
+      estimated: false,
+    });
   });
 
   test("fresh authoritative usage replaces an estimated cooldown", () => {

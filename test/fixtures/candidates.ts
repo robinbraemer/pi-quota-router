@@ -11,6 +11,7 @@ export function usage(options: {
   stale?: boolean;
   ageMs?: number;
   weeklyWindow?: boolean;
+  shortWindow?: boolean;
 }): UsageSnapshot {
   const {
     accountId,
@@ -21,14 +22,19 @@ export function usage(options: {
     stale = false,
     ageMs = 0,
     weeklyWindow = true,
+    shortWindow = true,
   } = options;
   return {
     accountId,
     observedAt: now - ageMs,
-    shortWindow: {
-      usedPercent: 100 - shortRemaining,
-      resetsAt: now + 5 * HOUR,
-    },
+    ...(shortWindow
+      ? {
+          shortWindow: {
+            usedPercent: 100 - shortRemaining,
+            resetsAt: now + 5 * HOUR,
+          },
+        }
+      : {}),
     ...(weeklyWindow
       ? {
           weeklyWindow: {
@@ -51,6 +57,7 @@ export function candidate(
     stale?: boolean;
     ageMs?: number;
     weeklyWindow?: boolean;
+    shortWindow?: boolean;
   } = {},
 ): Candidate {
   const {
@@ -60,6 +67,7 @@ export function candidate(
     stale,
     ageMs,
     weeklyWindow,
+    shortWindow,
     ...candidateOverrides
   } = overrides;
   return {
@@ -76,6 +84,7 @@ export function candidate(
       ...(stale !== undefined ? { stale } : {}),
       ...(ageMs !== undefined ? { ageMs } : {}),
       ...(weeklyWindow !== undefined ? { weeklyWindow } : {}),
+      ...(shortWindow !== undefined ? { shortWindow } : {}),
     }),
     ...candidateOverrides,
   };

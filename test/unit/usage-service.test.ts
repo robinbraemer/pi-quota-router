@@ -74,6 +74,29 @@ describe("UsageService", () => {
     expect(calls).toBe(0);
   });
 
+  test("serves a fresh weekly-only snapshot without fetching", async () => {
+    let calls = 0;
+    const weeklyOnly: UsageSnapshot = {
+      accountId: "a",
+      observedAt: 1_000_000,
+      weeklyWindow: { usedPercent: 3, resetsAt: 605_800_000 },
+      stale: false,
+    };
+    const service = createUsageService({
+      clock: () => 1_100_000,
+      jitterMs: () => 0,
+      fetchUsage: async (accountId) => {
+        calls += 1;
+        return snapshot(accountId, 1_100_000);
+      },
+    });
+
+    service.hydrate(weeklyOnly);
+
+    expect(await service.get("a")).toEqual(weeklyOnly);
+    expect(calls).toBe(0);
+  });
+
   test("coalesces refreshes and serves a five-minute fresh value", async () => {
     let now = 1_000_000;
     let calls = 0;
