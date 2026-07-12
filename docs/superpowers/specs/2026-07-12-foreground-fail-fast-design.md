@@ -1,11 +1,11 @@
 # Foreground Quota Fail-Fast Design
 
 **Date:** 2026-07-12
-**Status:** Approved by delegated product judgment
+**Status:** Implemented; operational rollout pending
 
 ## Problem
 
-Pi Quota Router currently keeps a foreground provider stream open when every managed Codex account is unavailable but at least one persisted block has a future retry time. The routed stream calls `waitForRecovery`, which sleeps and rechecks persisted state for up to six hours without producing a terminal stream event.
+Before this fix, Pi Quota Router kept a foreground provider stream open when every managed Codex account was unavailable but at least one persisted block had a future retry time. The routed stream called `waitForRecovery`, which slept and rechecked persisted state for up to six hours without producing a terminal stream event.
 
 The production `2ndmate-akua-secondmate` session demonstrated the failure mode:
 
@@ -55,17 +55,17 @@ The standalone recovery helper remains available only if another non-foreground 
 
 ### Routed stream
 
-`src/stream/routed-stream.ts` will stop invoking a recovery waiter on an unavailable selection. It will construct a typed `RouteUnavailableError`, exit the attempt loop, and emit the existing sanitized terminal error event.
+`src/stream/routed-stream.ts` no longer invokes a recovery waiter on an unavailable selection. It constructs a typed `RouteUnavailableError`, exits the attempt loop, and emits the existing sanitized terminal error event.
 
 The error sanitizer will preserve the approved `RouteUnavailableError` messages while continuing to collapse arbitrary provider failures to `No Codex account completed the request`.
 
 ### Router controller
 
-`src/router-controller.ts` will no longer supply `recoveryDeadline` or `waitForRecovery` to the foreground stream. Fresh usage selection, block reconciliation, reservation handling, rotation, and account-affinity behavior remain unchanged.
+`src/router-controller.ts` no longer supplies `recoveryDeadline` or `waitForRecovery` to the foreground stream. Fresh usage selection, block reconciliation, reservation handling, rotation, and account-affinity behavior remain unchanged.
 
 ### Documentation
 
-README, policy/design provenance, and troubleshooting material will state that foreground routing fails fast after fresh selection. They will no longer instruct users that an active foreground request waits up to six hours. The compatibility field remains documented as reserved for version-one file compatibility.
+README, policy/design provenance, and troubleshooting material state that foreground routing fails fast after fresh selection. They no longer instruct users that an active foreground request waits up to six hours. The compatibility field remains documented as reserved for version-one file compatibility.
 
 ## Testing strategy
 

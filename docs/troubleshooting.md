@@ -24,8 +24,8 @@ Start with:
 | `Codex login failed. Please try again.` | Retry the login and check connectivity. Upstream OAuth details are intentionally hidden because they may contain credentials. |
 | Footer still shows `none · login` after successful login | Run `/quota-router list` to confirm the account, then `/quota-router status`. Current versions rerender immediately; update the Git package if the stale footer persists. |
 | `Ambiguous Codex account label` | Run `/quota-router list` and repeat `use`, `refresh`, or `prime` with the intended managed account id. Duplicate labels are never resolved arbitrarily. |
-| `no_eligible_accounts` | Refresh usage, inspect policy/headroom, prime confirmed untouched accounts, or wait for cooldowns. A fresh non-exhausted result clears an estimated quota block, but not an authentication or transient block. A deliberate `/quota-router use <account>` can bypass automatic headroom. |
-| `manual_account_unavailable` | Reauthenticate/clear the account's block, wait for its reservation, or run `/quota-router use auto`. |
+| `No Codex account is currently eligible...` (`no_eligible_accounts`) | The foreground turn has ended; it is not waiting in the background. Refresh usage, inspect policy/headroom, prime confirmed untouched accounts, or wait for cooldowns and retry. A fresh non-exhausted result clears an estimated quota block, but not an authentication or transient block. A deliberate `/quota-router use <account>` can bypass automatic headroom. |
+| `The selected Codex account is currently unavailable` (`manual_account_unavailable`) | The foreground turn has ended. Reauthenticate/clear the account's block, wait for its reservation, or run `/quota-router use auto`, then retry. |
 | `not_authorized` from prime | Invoke `/quota-router prime ...` interactively and accept both confirmations. Authorization applies only to that invocation. |
 | `not_candidate` from prime | The account is already confirmed, is not untouched, or is inside the one-hour primer retry cooldown. |
 | `reserved` from prime | Another foreground/primer request owns the account or another process owns the singleton sweep. Wait for active work to finish; a crashed owner's lease expires within two minutes. |
@@ -49,15 +49,14 @@ Start with:
 | `ReservationLostError` | An active request's persisted lease disappeared or could not be renewed. | Retry the turn after checking peer processes. Do not reset reservations while any Pi process is active. |
 | `CodexUsageParseError` | The usage endpoint returned an unsupported body. | Update Pi Quota Router; preserve a redacted response shape if filing an issue. Never post headers/tokens. |
 | `CodexUsageHttpError` | Usage returned HTTP failure, timed out, or did not complete. | Check connectivity/authentication, run `refresh all`, and retry. Last-good data can be used conservatively for up to 24 hours. |
-| `RecoveryWaitTimeoutError` | No account recovered during the routed request's cumulative configured wait (six hours by default). | Refresh/login accounts or wait for the actual reset before retrying. |
-| `NoRecoverableAccountError` | Every unavailable account is permanently invalid or has no automatic retry time. | Reauthenticate or manually repair policy/state; waiting cannot help. |
+| `RouteUnavailableError` | Fresh selection found no eligible automatic account or the manual account was unavailable. The stream closes immediately with one of the actionable messages above. | Resolve quota, usage-data, health, block, or reservation state and start a new turn. |
 | `CommandParseError` | Unknown command, too many args, invalid reset/log option, or unsafe selector. | Use the command table in the README and quote labels containing spaces. |
 
 ## Stream behavior
 
-A quota/auth failure before text, thinking, or tool-call output may rotate transparently up to five attempts. A lone transport `start` is not visible output. Once any visible/model-action output begins, the router forwards the error and never replays; retry the turn manually after resolving the account.
+A quota/auth failure before text, thinking, or tool-call output may rotate transparently up to five attempts. A lone transport `start` is not visible output. If no eligible account remains, the stream returns an error immediately instead of holding the turn open. Once any visible/model-action output begins, the router forwards the error and never replays; retry the turn manually after resolving the account.
 
-Ctrl-C/Escape aborts usage work and all-limited recovery waits. Active reservations renew until completion; if a process is killed ungracefully, renewal stops and its reservations expire within two minutes.
+Ctrl-C/Escape aborts active usage and provider work. Active reservations renew until completion; if a process is killed ungracefully, renewal stops and its reservations expire within two minutes.
 
 ## Installation problems
 
