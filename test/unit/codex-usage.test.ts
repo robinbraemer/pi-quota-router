@@ -33,11 +33,7 @@ describe("Codex usage", () => {
   });
 
   test("classifies a duration-tagged primary weekly window without inventing short quota", () => {
-    const snapshot = parseCodexUsage(
-      weeklyOnlyPrimaryUsageResponse,
-      2_000_000_000_000,
-      "codex-a",
-    );
+    const snapshot = parseCodexUsage(weeklyOnlyPrimaryUsageResponse, 2_000_000_000_000, "codex-a");
 
     expect(snapshot.shortWindow).toBeUndefined();
     expect(snapshot.weeklyWindow).toEqual({
@@ -47,11 +43,7 @@ describe("Codex usage", () => {
   });
 
   test("uses recognized durations instead of primary and secondary position", () => {
-    const snapshot = parseCodexUsage(
-      reversedDurationUsageResponse,
-      2_000_000_000_000,
-      "codex-a",
-    );
+    const snapshot = parseCodexUsage(reversedDurationUsageResponse, 2_000_000_000_000, "codex-a");
 
     expect(snapshot.shortWindow).toEqual({
       usedPercent: 10,

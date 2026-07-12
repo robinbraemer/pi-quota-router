@@ -166,9 +166,7 @@ function evaluate(
   ) {
     return {
       explanation: reject(candidate, freshness, "short_headroom", {
-        ...(shortRemaining !== undefined
-          ? { shortWindowRemainingPercent: shortRemaining }
-          : {}),
+        ...(shortRemaining !== undefined ? { shortWindowRemainingPercent: shortRemaining } : {}),
         weeklyRemainingPercent: weeklyRemaining,
       }),
     };
@@ -176,9 +174,7 @@ function evaluate(
   if (weeklyRemaining < input.config.headroom.weeklyMinimumPercent) {
     return {
       explanation: reject(candidate, freshness, "weekly_headroom", {
-        ...(shortRemaining !== undefined
-          ? { shortWindowRemainingPercent: shortRemaining }
-          : {}),
+        ...(shortRemaining !== undefined ? { shortWindowRemainingPercent: shortRemaining } : {}),
         weeklyRemainingPercent: weeklyRemaining,
       }),
     };
