@@ -72,7 +72,6 @@ Borrow reliability mechanisms:
 - Persisted cooldowns and invalidation state.
 - Distinguishing transient auth failures from definitive revocation.
 - Bounded structured diagnostic log with credential redaction.
-- All-limited wake-up behavior and cancellation semantics.
 - Anti-ping-pong logic, stuck-work guards, and circuit-breaker thinking.
 - Account identity deduplication by stable Codex `accountId`.
 - Usage freshness reconciliation when an estimated quota cooldown is pessimistic.
@@ -233,8 +232,8 @@ The provider override is the only component coupled to Pi's streaming types. Sel
 - Marks replay unsafe only after text, thinking, or tool-call content starts.
 - On a pre-output quota/auth error, blocks the account, releases the lease, and retries another account up to five times.
 - On a classified post-output failure, records the account block and forwards the error unchanged without replaying.
-- If all accounts are temporarily blocked before output, waits abortably for the earliest recovery up to the configured limit (six hours by default).
-- Reuses one absolute recovery deadline across every wait in the routed request and resumes when any recoverable account becomes available.
+- If fresh selection finds no eligible account before output, emits one sanitized terminal error immediately.
+- Leaves recovery to a later request, which starts a new fresh selection pass.
 
 ### `src/status/status-controller.ts`
 
@@ -314,6 +313,8 @@ Defaults:
 - `headroom.weeklyMinimumPercent`: `3`
 - `priming.enabled`: `false`
 - `priming.confirmedFirstUseRollingWindow`: `false`
+
+`maxRecoveryWaitMs` is retained as a reserved version-one compatibility field. It has no effect on foreground routing; removing it requires a versioned config migration.
 - `priming.maximumPerSweep`: `1`
 - `priming.retryCooldownMs`: `3600000`
 
@@ -457,13 +458,9 @@ After model-visible output begins, the wrapper forwards the provider error and n
 
 ### All accounts unavailable
 
-Before any output, the wrapper waits for the earliest known recovery when:
+Before any output, fresh selection that finds no eligible account emits one terminal `RouteUnavailableError` and closes the stream. Automatic selection reports `No Codex account is currently eligible; quota, usage data, or account health must recover before retrying`; an unavailable manual override reports `The selected Codex account is currently unavailable`.
 
-- At least one account is temporarily blocked rather than permanently invalid.
-- The wait remains inside the configured limit, which defaults to six hours.
-- The caller's abort signal remains active.
-
-The wait re-checks persisted state and the managed account list at most once per minute, so a peer process login, refresh, usage correction, or reservation release can wake the request as soon as any recoverable account is available. Every wait in one routed request shares one cumulative configured deadline. Escape/user abort ends the wait immediately.
+The wrapper does not retain the old request while waiting for a reset, peer login, usage correction, or reservation release. A later request observes those changes through a new selection pass.
 
 ## Concurrency model
 
@@ -555,10 +552,10 @@ Each atomic selection persists a credential-free `lastSelection` explanation in 
 - Pre-output quota failure rotates and replays once.
 - A transport `start` event does not prohibit replay.
 - Text, thinking, or tool-call start prohibits replay.
-- Abort cancels the caller's usage wait, token refresh wait, provider stream, and recovery sleep; a shared usage fetch remains alive for other callers.
+- Abort cancels the caller's usage wait, token refresh wait, and provider stream; a shared usage fetch remains alive for other callers.
 - Maximum rotation attempts is enforced.
-- All-limited wait wakes on the first recovered account.
-- No permanent-invalid account participates in waiting.
+- Unavailable selection fails promptly without holding a foreground request open.
+- No permanent-invalid account participates in automatic selection.
 
 ### Auth and concurrency tests
 
@@ -572,7 +569,7 @@ Each atomic selection persists a credential-free `lastSelection` explanation in 
 - Successful reauthentication clears the account's permanent auth block.
 - Stale auth failures cannot invalidate credentials installed by a concurrent re-login.
 - Forced fresh non-exhausted usage clears an estimated quota cooldown without clearing authentication or transient blocks.
-- Recovery waiting notices an account added by a peer.
+- A later request notices an account added by a peer.
 
 ### Storage tests
 

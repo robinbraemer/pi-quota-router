@@ -10,10 +10,6 @@ import {
 import type { FreshCredential } from "../accounts/account-vault.ts";
 import type { FailureClass } from "../recovery/failure-classifier.ts";
 import {
-  NoRecoverableAccountError,
-  RecoveryWaitTimeoutError,
-} from "../recovery/wait-for-recovery.ts";
-import {
   ReservationLostError,
   startReservationHeartbeat,
 } from "../routing/reservation-heartbeat.ts";
@@ -35,12 +31,7 @@ export interface RoutedLease {
 
 export type RouteSelection =
   | { kind: "selected"; lease: RoutedLease }
-  | {
-      kind: "unavailable";
-      reason: string;
-      recoverableAccountIds: string[];
-      knownAccountIds: string[];
-    };
+  | { kind: "unavailable"; reason: string };
 
 export interface RoutedStreamDependencies {
   selectAndReserve(request: RouteAttemptRequest): Promise<RouteSelection>;
@@ -60,13 +51,6 @@ export interface RoutedStreamDependencies {
   recordSuccess(accountId: string, sessionId?: string): void;
   release(leaseToken: string): Promise<void>;
   renew(leaseToken: string, ttlMs: number): Promise<boolean>;
-  recoveryDeadline(): number;
-  waitForRecovery(
-    accountIds: readonly string[],
-    knownAccountIds: readonly string[],
-    deadline: number,
-    signal?: AbortSignal,
-  ): Promise<void>;
   maxAttempts(): number;
 }
 
@@ -74,7 +58,13 @@ class RouteUnavailableError extends Error {
   override readonly name = "RouteUnavailableError";
 
   constructor(reason: string) {
-    super(`No Codex account is available: ${reason}`);
+    super(
+      reason === "no_eligible_accounts"
+        ? "No Codex account is currently eligible; quota, usage data, or account health must recover before retrying"
+        : reason === "manual_account_unavailable"
+          ? "The selected Codex account is currently unavailable"
+          : `No Codex account is available: ${reason}`,
+    );
   }
 }
 
@@ -87,7 +77,6 @@ export function createRoutedStream(
     void (async () => {
       const excludedAccountIds = new Set<string>();
       let lastFailure: unknown;
-      let recoveryDeadline: number | undefined;
 
       for (let attempt = 0; attempt < dependencies.maxAttempts(); ) {
         options?.signal?.throwIfAborted();
@@ -98,19 +87,8 @@ export function createRoutedStream(
           ...(options ? { options } : {}),
         });
         if (selection.kind === "unavailable") {
-          if (selection.recoverableAccountIds.length === 0) {
-            lastFailure = new RouteUnavailableError(selection.reason);
-            break;
-          }
-          recoveryDeadline ??= dependencies.recoveryDeadline();
-          await dependencies.waitForRecovery(
-            selection.recoverableAccountIds,
-            selection.knownAccountIds,
-            recoveryDeadline,
-            options?.signal,
-          );
-          excludedAccountIds.clear();
-          continue;
+          lastFailure = new RouteUnavailableError(selection.reason);
+          break;
         }
 
         const { lease } = selection;
@@ -176,7 +154,6 @@ export function createRoutedStream(
                   if (
                     boundary.isReplaySafe() &&
                     canRotateBeforeOutput(failure) &&
-                    attempt < dependencies.maxAttempts() &&
                     !options?.signal?.aborted
                   ) {
                     excludedAccountIds.add(lease.accountId);
@@ -240,7 +217,6 @@ export function createRoutedStream(
               if (
                 boundary.isReplaySafe() &&
                 canRotateBeforeOutput(failure) &&
-                attempt < dependencies.maxAttempts() &&
                 !options?.signal?.aborted
               ) {
                 excludedAccountIds.add(lease.accountId);
@@ -264,7 +240,6 @@ export function createRoutedStream(
           if (
             boundary.isReplaySafe() &&
             canRotateBeforeOutput(failure) &&
-            attempt < dependencies.maxAttempts() &&
             !options?.signal?.aborted
           ) {
             excludedAccountIds.add(lease.accountId);
@@ -280,7 +255,15 @@ export function createRoutedStream(
         }
       }
 
-      output.push(errorEvent(model, "error", lastFailure));
+      output.push(
+        errorEvent(
+          model,
+          "error",
+          lastFailure instanceof RouteUnavailableError
+            ? lastFailure
+            : new RouteUnavailableError("no_eligible_accounts"),
+        ),
+      );
     })().catch((error) => {
       output.push(errorEvent(model, options?.signal?.aborted ? "aborted" : "error", error));
     });
@@ -322,11 +305,7 @@ function sanitizedErrorMessage(reason: "aborted" | "error", error: unknown): str
       ? error.message
       : "The Codex request was cancelled";
   }
-  if (
-    error instanceof ReservationLostError ||
-    error instanceof RecoveryWaitTimeoutError ||
-    error instanceof NoRecoverableAccountError
-  ) {
+  if (error instanceof ReservationLostError || error instanceof RouteUnavailableError) {
     return error.message;
   }
   return "No Codex account completed the request";

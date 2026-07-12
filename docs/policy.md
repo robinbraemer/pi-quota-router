@@ -62,9 +62,9 @@ Primer work renews both its singleton sweep lease and account lease. Foreground 
 - When no other live block governs the account, fresh usage showing an exhausted window creates a quota block until the earliest future reset. A cached snapshot is refreshed as soon as either recorded reset time elapses.
 - A transport `start` event is replay-safe.
 - Any text, thinking, or tool-call start makes replay unsafe; later errors are forwarded without account rotation.
-- A request performs at most five account attempts. An account that failed earlier may become eligible again after its cooldown expires during recovery.
+- A request performs at most five account attempts.
 - An explicit provider retry time controls a quota block. Otherwise the latest observed reset across exhausted windows is used; without either, the estimate is one hour.
-- All-limited recovery waits are abortable, recheck state at most once per minute, and stop at the configured recovery limit (six hours by default).
+- If fresh selection finds no eligible account, the foreground stream emits one sanitized terminal error immediately. A later retry performs a new selection pass and can use recovered quota or account health.
 - `invalid_grant`, a usage credential rejected again after forced refresh, and revoked refresh tokens set `needsReauth` only while the rejected credential is still current. A concurrent successful re-login wins and remains healthy.
 - Generic network/timeout failures use a one-minute transient retry time.
 - A generic `401` from usage collection or a pre-output routed provider call forces one token refresh and retries the same account before rotation.
@@ -75,7 +75,7 @@ Concurrent ordinary usage refreshes for one account are coalesced. A forced refr
 
 OAuth token refresh is likewise single-flight per account within a process. Cancelling one caller stops only that caller's wait, while the shared refresh continues for other callers.
 
-When all known accounts are temporarily unavailable, recovery rechecks persisted blocks, reservations, and the managed account list at most once per minute. It resumes as soon as any recoverable account becomes available or a new account is logged in. Repeated recovery waits within one routed request share one cumulative configured deadline rather than restarting the limit.
+Foreground routing never waits for future quota recovery. `maxRecoveryWaitMs` remains in the strict version-one config only for file and rollback compatibility; it has no effect on a foreground request. The standalone recovery helper remains tested but is not wired into routed streams.
 
 ## Priming policy
 

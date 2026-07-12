@@ -66,6 +66,8 @@ The highest urgency wins. For example:
 
 Scores within 10% are treated as tied. The router retains the eligible account that last completed a routed request within that band; a login display update or failed route does not receive this preference. Otherwise it prefers the least weekly quota remaining, then the most 5-hour quota remaining, then the stable managed account id. See [the exact policy](docs/policy.md).
 
+If fresh selection finds no eligible account, the foreground turn ends immediately with an actionable error. The router does not keep an old turn open waiting for quota or account health to recover; retrying later starts a new selection pass and can use any account that has recovered. Replay-safe failover among currently eligible accounts still occurs before model-visible output.
+
 ## Priming untouched accounts
 
 Priming deliberately sends a real minimal Codex request. It is not a read-only quota check. Do not run it unless you have independently confirmed that first use starts the weekly rolling window for these accounts.
@@ -139,6 +141,8 @@ By default, data lives in `~/.pi/agent/pi-quota-router/`. If `PI_CODING_AGENT_DI
 The containing directory is `0700`. Same-directory temporary files, lock targets, and the single rotated `events.ndjson.1` predecessor are also private. Details and threat limits are in [Security](docs/security.md).
 
 Cached usage snapshots survive Pi restarts. The router reuses them while fresh, can fall back to them conservatively for up to 24 hours after a fetch failure, and refreshes them when their freshness or recorded reset time expires.
+
+Version-one config files retain `maxRecoveryWaitMs` as a reserved compatibility field. It no longer affects foreground routing and must remain present only so existing strict config files and older rollback versions stay readable.
 
 ## Update and uninstall
 

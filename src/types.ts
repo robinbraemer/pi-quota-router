@@ -4,6 +4,7 @@ export interface RouterConfig {
   manualAccountId?: string | undefined;
   usageFreshnessMs: number;
   maxRotationAttempts: number;
+  /** Reserved for strict version-one config and rollback compatibility. */
   maxRecoveryWaitMs: number;
   reservationTtlMs: number;
   scoreHysteresisRatio: number;
