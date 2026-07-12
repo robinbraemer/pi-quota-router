@@ -186,7 +186,7 @@ bun test test/unit/selection-policy.test.ts test/unit/usage-service.test.ts test
 
 Expected: required-short dereferences fail or weekly-only behavior is incorrect.
 
-- [ ] **Step 4: Implement minimal optional-window handling.** Use neutral `shortRemaining = 100` only internally for tie ordering when absent, but omit it from explanations and never apply the short floor. Iterate `[usage.shortWindow, usage.weeklyWindow]` only after filtering. Require a reported short window for untouched priming. Render `5h n/a` in both status surfaces.
+- [ ] **Step 4: Implement minimal optional-window handling.** Apply the short-window tie-break only when every tied candidate reports that window, omit absent short quota from explanations, and never apply the short floor when it is absent. Iterate `[usage.shortWindow, usage.weeklyWindow]` only after filtering. Require a reported short window for untouched priming. Render `5h n/a` in both status surfaces.
 
 ```ts
 const short = candidate.usage.shortWindow;

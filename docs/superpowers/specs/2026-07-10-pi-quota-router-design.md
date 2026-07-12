@@ -28,7 +28,7 @@ The router does not merely choose the lowest usage percentage. It:
 - Route automatically among equivalent Codex OAuth accounts.
 - Optimize effective usable quota over time rather than evenly balancing percentages.
 - Support one-shot priming when the operator explicitly confirms both quota spend and first-use rolling-window behavior for that invocation.
-- Avoid starting work on an account that lacks conservative 5-hour or weekly headroom.
+- Avoid starting work below conservative weekly headroom or, when reported, 5-hour headroom.
 - Keep routing deterministic, explainable, observable, abortable, and safe under multiple Pi processes.
 - Recover transparently from pre-output quota, authentication, and token-refresh failures.
 - Provide a coherent `/quota-router` command family and a compact footer.
@@ -237,7 +237,7 @@ The provider override is the only component coupled to Pi's streaming types. Sel
 
 ### `src/status/status-controller.ts`
 
-- Renders a compact footer with active account, 5-hour remaining, weekly remaining, reset countdown, urgency, and routing mode.
+- Renders a compact footer with active account, reported 5-hour remaining or `n/a`, weekly remaining, reset countdown, urgency, and routing mode.
 - Uses cached data without triggering a usage refresh.
 - Keeps rendering independent from routing success.
 
@@ -403,7 +403,7 @@ Priming is intentional quota spend, not quota inspection.
 
 An account is a priming candidate only when a fresh usage snapshot shows:
 
-- 0% used in both active windows.
+- 0% used in both a reported 5-hour window and the weekly window.
 - No observed weekly reset timestamp.
 - Healthy authentication.
 - No cooldown, reservation, or prior successful primer.
@@ -528,7 +528,7 @@ Each atomic selection persists a credential-free `lastSelection` explanation in 
 
 - Near-reset high remaining quota beats lower remaining quota with a distant reset.
 - Similar urgency drains the least weekly remaining account.
-- Short-window headroom vetoes a weekly winner.
+- Reported short-window headroom vetoes a weekly winner.
 - Manual selection wins while healthy.
 - Stale data is penalized and fresh data wins.
 - Untouched/no-clock accounts are excluded until primed or manually selected.
@@ -623,7 +623,7 @@ A release is blocked unless:
 - High remaining quota near reset is spent before less urgent quota.
 - Similar-urgency accounts drain the least weekly remaining safe account.
 - Synthetic primer spend occurs only after explicit confirmation and is verified from fresh usage.
-- No task starts below the configured 5-hour or weekly headroom floor unless manually forced.
+- No task starts below the configured weekly headroom floor or a reported 5-hour headroom floor unless manually forced.
 - Parallel Pi processes do not select the same free account concurrently.
 - Token refresh races cannot burn a rotating refresh token.
 - Failover before output is transparent; failover after output never replays.

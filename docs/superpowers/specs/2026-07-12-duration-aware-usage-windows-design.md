@@ -68,7 +68,7 @@ Cache expiry checks each reported window independently. Quota-block derivation c
 
 ### Automatic selection
 
-Weekly quota and its future reset remain required because weekly urgency is the extension's selection purpose. If a short window exists, the configured 10% short-headroom floor and stale-data penalty apply normally. If it is absent, no short-headroom veto is applied and tie-breaking treats short remaining as neutral rather than preferred.
+Weekly quota and its future reset remain required because weekly urgency is the extension's selection purpose. If a short window exists, the configured 10% short-headroom floor and stale-data penalty apply normally. If it is absent, no short-headroom veto is applied; the short-window tie-break runs only when every tied candidate reports that window.
 
 Candidate explanations omit `shortWindowRemainingPercent` when no short window exists.
 
