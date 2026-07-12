@@ -72,7 +72,6 @@ Borrow reliability mechanisms:
 - Persisted cooldowns and invalidation state.
 - Distinguishing transient auth failures from definitive revocation.
 - Bounded structured diagnostic log with credential redaction.
-- All-limited wake-up behavior and cancellation semantics.
 - Anti-ping-pong logic, stuck-work guards, and circuit-breaker thinking.
 - Account identity deduplication by stable Codex `accountId`.
 - Usage freshness reconciliation when an estimated quota cooldown is pessimistic.
