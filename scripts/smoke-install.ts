@@ -6,6 +6,7 @@ import { OPENAI_CODEX_MODELS } from "@earendil-works/pi-ai/providers/openai-code
 
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const configuredSource = process.env.PI_QUOTA_ROUTER_GIT_SOURCE;
+const credentialFree = process.env.PI_QUOTA_ROUTER_CREDENTIAL_FREE === "1";
 const root = await mkdtemp(join(tmpdir(), "pi-quota-router-git-smoke-"));
 const agentDirectory = join(root, "agent");
 const project = join(root, "project");
@@ -22,11 +23,14 @@ try {
     server = local.server;
   }
 
+  await mkdir(project, { recursive: true });
+  const env = installEnvironment(root, agentDirectory, credentialFree);
+
   if (process.env.PI_QUOTA_ROUTER_REQUIRE_PUBLISHED_REVISION === "1") {
     if (configuredSource === undefined) {
       throw new Error("Published-revision validation requires PI_QUOTA_ROUTER_GIT_SOURCE");
     }
-    const remoteRefs = await run(["git", "ls-remote", "origin"], repository);
+    const remoteRefs = await run(["git", "ls-remote", gitRemote(configuredSource)], project, env);
     if (!remoteRefs.includes(revision)) {
       throw new Error(
         `HEAD ${revision.slice(0, 12)} is not pushed to origin; the remote GitHub install smoke only tests published commits`,
@@ -34,12 +38,6 @@ try {
     }
   }
 
-  await mkdir(project, { recursive: true });
-  const env = {
-    ...process.env,
-    PI_CODING_AGENT_DIR: agentDirectory,
-    GIT_TERMINAL_PROMPT: "0",
-  };
   const pinnedSource = `${source}@${revision}`;
   await run([piExecutable(), "install", pinnedSource, "--no-approve"], project, env);
   const installed = await run([piExecutable(), "--list-models", "openai-codex"], project, env);
@@ -120,6 +118,46 @@ async function createLocalGitSource(
 
 function piExecutable(): string {
   return process.env.PI_EXECUTABLE ?? join(repository, "node_modules", ".bin", "pi");
+}
+
+function installEnvironment(
+  root: string,
+  agentDirectory: string,
+  credentialFree: boolean,
+): Record<string, string | undefined> {
+  if (!credentialFree) {
+    return {
+      ...process.env,
+      PI_CODING_AGENT_DIR: agentDirectory,
+      GIT_TERMINAL_PROMPT: "0",
+    };
+  }
+
+  return {
+    PATH: `${process.env.PATH ?? ""}:/usr/local/bin:/usr/bin:/bin`,
+    HOME: join(root, "home"),
+    TMPDIR: root,
+    PI_CODING_AGENT_DIR: agentDirectory,
+    NPM_CONFIG_USERCONFIG: join(root, "npmrc"),
+    NPM_CONFIG_GLOBALCONFIG: join(root, "global-npmrc"),
+    NPM_CONFIG_CACHE: join(root, "npm-cache"),
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_CONFIG_COUNT: "1",
+    GIT_CONFIG_KEY_0: "credential.helper",
+    GIT_CONFIG_VALUE_0: "",
+    GIT_TERMINAL_PROMPT: "0",
+    GIT_ASKPASS: "/usr/bin/false",
+    SSH_ASKPASS: "/usr/bin/false",
+    GIT_SSH_COMMAND: "/usr/bin/false",
+    GIT_ALLOW_PROTOCOL: "https",
+    GCM_INTERACTIVE: "never",
+  };
+}
+
+function gitRemote(source: string): string {
+  if (!source.startsWith("git:")) throw new Error(`Unsupported Git source ${source}`);
+  return source.slice("git:".length);
 }
 
 async function run(
