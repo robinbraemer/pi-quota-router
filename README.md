@@ -26,9 +26,9 @@ For repeatable installs, pin the tag or exact commit you reviewed:
 pi install git:git@github.com:robinbraemer/pi-quota-router@<tag-or-commit>
 ```
 
-Restart Pi after installation. The extension supports normal Pi `>=0.80.6`, Node.js `>=22.19.0`, and Bun `>=1.3.7` for development and repository checks. It overrides only Pi's built-in `openai-codex` provider; it does not require a Pi fork or Lavish.
+Restart Pi after installation. The extension supports normal Pi `>=0.80.6` on Node.js `>=22.19.0`. It overrides only Pi's built-in `openai-codex` provider; it does not require a Pi fork or Lavish.
 
-Review the commit before installing, especially when using an unpinned ref: Pi extensions run with the same local authority as Pi. The router keeps its own OAuth vault, does not rewrite Pi's `auth.json`, and stores account tokens only in its private data directory. See [Security](docs/security.md) before adding an account.
+Review the commit before installing, especially when using an unpinned ref: Pi extensions run with the same local authority as Pi. See [Security](docs/security.md) before adding an account.
 
 ## First use
 
@@ -185,10 +185,10 @@ bun run check
 bun run pack:check
 ```
 
-The source uses erasable TypeScript syntax and normal Pi public APIs. Development and release checks use Bun `>=1.3.7`; the shipped extension supports normal Pi `>=0.80.6` on Node.js `>=22.19.0` and does not use Bun runtime APIs.
+The source uses erasable TypeScript syntax and normal Pi public APIs. Development and release checks use Bun 1.3.7; the shipped extension does not use Bun runtime APIs.
 
 ## Support and security
 
 For operational problems, start with `/quota-router verify` and [Troubleshooting](docs/troubleshooting.md). Repository collaborators can report a reproducible bug or request an improvement through [GitHub issues](https://github.com/robinbraemer/pi-quota-router/issues).
 
-For suspected vulnerabilities, do not include credentials, OAuth authorization URLs, account ids, or logs in GitHub issues. See [Security reporting](SECURITY.md) for current reporting availability.
+For vulnerability reporting availability and handling guidance, see [Security reporting](SECURITY.md).
