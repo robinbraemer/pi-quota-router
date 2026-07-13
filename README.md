@@ -191,4 +191,4 @@ The source uses erasable TypeScript syntax and normal Pi public APIs. Developmen
 
 For operational problems, start with `/quota-router verify` and [Troubleshooting](docs/troubleshooting.md). Repository collaborators can report a reproducible bug or request an improvement through [GitHub issues](https://github.com/robinbraemer/pi-quota-router/issues).
 
-For suspected vulnerabilities, do not include credentials, OAuth authorization URLs, account ids, or logs in a public issue. Use the private reporting route in [SECURITY.md](SECURITY.md).
+For suspected vulnerabilities, do not include credentials, OAuth authorization URLs, account ids, or logs in GitHub issues. See [Security reporting](SECURITY.md) for current reporting availability.
