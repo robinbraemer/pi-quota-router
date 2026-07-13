@@ -6,27 +6,29 @@ It refreshes reported 5-hour and weekly usage before automatic selection, classi
 
 ## Install from GitHub
 
-This package is installed through Pi's Git/GitHub package support. It is not distributed through npm.
+Install this extension through Pi's Git package support. It is not distributed through npm.
 
-For this private repository, SSH is the most reliable install method:
-
-```bash
-pi install git:git@github.com:robinbraemer/pi-quota-router
-```
-
-If your Git credential helper already authenticates private GitHub HTTPS clones:
+Install the current public version over HTTPS:
 
 ```bash
-pi install git:github.com/robinbraemer/pi-quota-router
+pi install git:https://github.com/robinbraemer/pi-quota-router.git
 ```
 
-Pi supports pinned Git refs as well:
+For repeatable installs, pin a released tag:
 
 ```bash
-pi install git:git@github.com:robinbraemer/pi-quota-router@<tag-or-commit>
+pi install git:https://github.com/robinbraemer/pi-quota-router.git@<tag>
 ```
 
-Restart Pi after installation. The extension targets normal Pi and overrides only the built-in `openai-codex` provider. It does not require a Pi fork or Lavish.
+Or pin the exact commit you reviewed:
+
+```bash
+pi install git:https://github.com/robinbraemer/pi-quota-router.git@a2a122c3ac9bde090061680c43ee738e7f7446b8
+```
+
+Restart Pi after installation. The extension supports normal Pi `>=0.80.6`, Node.js `>=22.19.0`, and Bun `>=1.3.7` for development and repository checks. It overrides only Pi's built-in `openai-codex` provider; it does not require a Pi fork or Lavish.
+
+Review the commit before installing, especially when using an unpinned ref: Pi extensions run with the same local authority as Pi. The router keeps its own OAuth vault, does not rewrite Pi's `auth.json`, and stores account tokens only in its private data directory. See [Security](docs/security.md) before adding an account.
 
 ## First use
 
@@ -149,16 +151,18 @@ Version-one config files retain `maxRecoveryWaitMs` as a reserved compatibility 
 
 ## Update and uninstall
 
-Update the GitHub-installed package through Pi:
+Update an unpinned Git installation through Pi:
 
 ```bash
 pi update --extensions
 ```
 
+Pinned tag or commit installations stay at that revision. Re-run `pi install` with the new tag or commit to change them.
+
 Remove the extension while retaining its account vault and state:
 
 ```bash
-pi remove git:git@github.com:robinbraemer/pi-quota-router
+pi remove git:https://github.com/robinbraemer/pi-quota-router.git
 ```
 
 Pi removes the package registration/clone; `~/.pi/agent/pi-quota-router/` remains available for a later reinstall. To permanently delete all router credentials and state, first uninstall, close every Pi process, verify the printed path with `/quota-router path`, and then run:
@@ -174,17 +178,17 @@ That deletion cannot be undone.
 The repository uses Bun for dependency management, tests, and release checks:
 
 ```bash
-git clone git@github.com:robinbraemer/pi-quota-router.git
+git clone https://github.com/robinbraemer/pi-quota-router.git
 cd pi-quota-router
 bun install --frozen-lockfile --ignore-scripts
 bun run check
 bun run pack:check
 ```
 
-The source uses erasable TypeScript syntax and normal Pi public APIs. Development uses Bun 1.3.7+, while the shipped extension remains compatible with normal Pi's Node.js runtime (`>=22.19.0`) and does not use Bun runtime APIs.
+The source uses erasable TypeScript syntax and normal Pi public APIs. Development and release checks use Bun `>=1.3.7`; the shipped extension supports normal Pi `>=0.80.6` on Node.js `>=22.19.0` and does not use Bun runtime APIs.
 
-For problems, start with `/quota-router verify` and [Troubleshooting](docs/troubleshooting.md).
+## Support and security
 
-## Design provenance
+For operational problems, start with `/quota-router verify` and [Troubleshooting](docs/troubleshooting.md). To report a reproducible bug or request an improvement, open a [GitHub issue](https://github.com/robinbraemer/pi-quota-router/issues).
 
-The clean-room implementation combines the best ideas from `victor-software-house/pi-multicodex` (stream boundary and modularity), `Sarrius/pi-multi-account` (cooldowns, invalidation, logs, recovery), and `kim0/pi-multicodex` (untouched-account priming), with a quota-urgency policy and stronger atomic storage/concurrency guarantees. See the [design specification](docs/superpowers/specs/2026-07-10-pi-quota-router-design.md).
+For suspected vulnerabilities, do not include credentials, OAuth authorization URLs, account ids, or logs in a public issue. Use the private reporting route in [SECURITY.md](SECURITY.md).

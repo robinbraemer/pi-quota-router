@@ -6,7 +6,8 @@ import { OPENAI_CODEX_MODELS } from "@earendil-works/pi-ai/providers/openai-code
 
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const source =
-  process.env.PI_QUOTA_ROUTER_GIT_SOURCE ?? "git:git@github.com:robinbraemer/pi-quota-router";
+  process.env.PI_QUOTA_ROUTER_GIT_SOURCE ??
+  "git:https://github.com/robinbraemer/pi-quota-router.git";
 const root = await mkdtemp(join(tmpdir(), "pi-quota-router-github-smoke-"));
 const agentDirectory = join(root, "agent");
 const project = join(root, "project");
@@ -27,7 +28,6 @@ try {
     ...process.env,
     PI_CODING_AGENT_DIR: agentDirectory,
     GIT_TERMINAL_PROMPT: "0",
-    GIT_SSH_COMMAND: process.env.GIT_SSH_COMMAND ?? "ssh -o BatchMode=yes -o ConnectTimeout=10",
   };
   const pinnedSource = `${source}@${revision}`;
   await run([piExecutable(), "install", pinnedSource, "--no-approve"], project, env);

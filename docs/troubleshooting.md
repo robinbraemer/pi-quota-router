@@ -61,20 +61,13 @@ Ctrl-C/Escape aborts active usage and provider work. Active reservations renew u
 
 ## Installation problems
 
-For a private GitHub repository, prefer SSH:
-
-```bash
-ssh -T git@github.com
-pi install git:git@github.com:robinbraemer/pi-quota-router
-```
-
-In non-interactive environments use `GIT_TERMINAL_PROMPT=0` and an appropriate `GIT_SSH_COMMAND`. `pi list` should show the Git source. If model listing fails, run:
+Install the public HTTPS Git source shown in the [README](../README.md#install-from-github). `pi list` should show the Git source. If model listing fails, run:
 
 ```bash
 pi --list-models openai-codex
 ```
 
-All normal Codex model ids should appear. The release smoke test installs an exact pushed commit through this GitHub path in an isolated `PI_CODING_AGENT_DIR`.
+All normal Codex model ids should appear. CI also verifies an exact pushed commit through this GitHub path in an isolated Pi profile.
 
 ## Safe resets
 

@@ -42,10 +42,8 @@ jobs:
       - name: Scan tracked files and test output for secrets
         run: bun run check:secrets
 
-      - name: Configure private GitHub clone
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: git config --global url."https://x-access-token:${GITHUB_TOKEN}@github.com/".insteadOf "git@github.com:"
+      - name: Check public documentation hygiene
+        run: bun run check:public-hygiene
 
       - name: Smoke-test Pi's GitHub install path
         env:
