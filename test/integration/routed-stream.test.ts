@@ -558,6 +558,19 @@ describe("RoutedStream", () => {
   test("terminates a silent post-output attempt without replay or failure persistence", async () => {
     const timers = new FakeTimers();
     const controller = new AbortController();
+    const visiblePartial: AssistantMessage = {
+      ...message(),
+      content: [{ type: "text", text: "partial answer" }],
+      usage: {
+        input: 11,
+        output: 7,
+        cacheRead: 5,
+        cacheWrite: 3,
+        reasoning: 4,
+        totalTokens: 26,
+        cost: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, total: 10 },
+      },
+    };
     let entered: (() => void) | undefined;
     let renewed: (() => void) | undefined;
     const enteredAttempt = new Promise<void>((resolve) => {
@@ -575,6 +588,12 @@ describe("RoutedStream", () => {
             type: "text_start",
             contentIndex: 0,
             partial: message(),
+          } as AssistantMessageEvent;
+          yield {
+            type: "text_delta",
+            contentIndex: 0,
+            delta: "partial answer",
+            partial: visiblePartial,
           } as AssistantMessageEvent;
           entered?.();
           const signal = options?.signal;
@@ -600,7 +619,7 @@ describe("RoutedStream", () => {
     const routed = createRoutedStream(setup.value);
     const stream = routed(model, context, { signal: controller.signal });
     let settled = false;
-    const result = stream.result().finally(() => {
+    const result = collect(stream).finally(() => {
       settled = true;
     });
 
@@ -615,9 +634,22 @@ describe("RoutedStream", () => {
       await flushAsyncWork();
 
       expect(settled).toBeTrue();
-      const terminal = await result;
-      expect(terminal.stopReason).toBe("error");
-      expect(terminal.errorMessage).toBe("The Codex response stream became idle after output");
+      const events = await result;
+      expect(events.map((event) => event.type)).toEqual([
+        "start",
+        "text_start",
+        "text_delta",
+        "error",
+      ]);
+      const terminal = events.at(-1);
+      expect(terminal?.type).toBe("error");
+      if (terminal?.type !== "error") throw new Error("expected a terminal error event");
+      expect(terminal.error.content).toEqual(visiblePartial.content);
+      expect(terminal.error.usage).toEqual(visiblePartial.usage);
+      expect(terminal.error.stopReason).toBe("error");
+      expect(terminal.error.errorMessage).toBe(
+        "The Codex response stream became idle after output",
+      );
       expect(setup.selected).toEqual(["a"]);
       expect(setup.recorded).toEqual([]);
       expect(setup.released).toEqual(["lease-a"]);

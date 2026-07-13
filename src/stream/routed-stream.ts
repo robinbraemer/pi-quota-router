@@ -124,6 +124,7 @@ export function createRoutedStream(
           let credential = await dependencies.getFreshCredential(lease.accountId, heartbeat.signal);
           providerAttempt: while (true) {
             let pendingStart: Extract<AssistantMessageEvent, { type: "start" }> | undefined;
+            let latestPartial: AssistantMessage | undefined;
             const deadline = createStreamDeadline({
               heartbeatSignal: heartbeat.signal,
               ...(options?.signal ? { externalSignal: options.signal } : {}),
@@ -200,6 +201,7 @@ export function createRoutedStream(
                 }
 
                 if (event.type !== "done") {
+                  latestPartial = event.partial;
                   deadline.arm(boundary.isReplaySafe() ? "pre-output" : "post-output");
                 }
                 if (pendingStart) {
@@ -236,7 +238,7 @@ export function createRoutedStream(
                 if (pendingStart) {
                   output.push(pendingStart);
                 }
-                output.push(errorEvent(model, "error", error));
+                output.push(errorEvent(model, "error", error, latestPartial));
                 return;
               }
               const failure = dependencies.classifyFailure(error);

@@ -44,6 +44,7 @@ const NOW = 2_000_000_000_000;
 const model = Object.values(OPENAI_CODEX_MODELS)[0] as Model<"openai-codex-responses">;
 const context = { messages: [] } as Context;
 const cleanups: Array<() => Promise<void>> = [];
+const WORKER_READY_TIMEOUT_MS = 5_000;
 
 setDefaultTimeout(30_000);
 
@@ -56,6 +57,7 @@ async function selectPrimerFenceWorker(input: {
   requestId: string;
   accountIds?: string;
   environment?: Record<string, string>;
+  startBarrier?: { path: string; releaseDelayMs: number };
 }): Promise<{ accountId?: string }> {
   const worker = new URL("../helpers/worker-select.ts", import.meta.url).pathname;
   const child = Bun.spawn(
@@ -70,7 +72,13 @@ async function selectPrimerFenceWorker(input: {
     {
       stdout: "pipe",
       stderr: "pipe",
-      env: { ...process.env, ...input.environment },
+      env: {
+        ...process.env,
+        ...input.environment,
+        ...(input.startBarrier
+          ? { PI_QUOTA_ROUTER_TEST_START_BARRIER: input.startBarrier.path }
+          : {}),
+      },
     },
   );
   const result = Promise.all([
@@ -79,22 +87,86 @@ async function selectPrimerFenceWorker(input: {
     new Response(child.stderr).text(),
   ]);
   try {
+    if (input.startBarrier) {
+      await releaseStagedWorker({
+        barrier: input.startBarrier.path,
+        requestId: input.requestId,
+        releaseDelayMs: input.startBarrier.releaseDelayMs,
+        workerExited: child.exited,
+      });
+    }
     const [exitCode, stdout, stderr] = await result;
-    expect(exitCode).toBe(0);
-    expect(stderr).toBe("");
-    return JSON.parse(stdout) as { accountId?: string };
+    if (exitCode !== 0 || stderr !== "") {
+      throw new Error(
+        [
+          `foreground worker exited with code ${exitCode}`,
+          `stdout:\n${stdout}`,
+          `stderr:\n${stderr}`,
+        ].join("\n"),
+      );
+    }
+    try {
+      return JSON.parse(stdout) as { accountId?: string };
+    } catch (error) {
+      throw new Error(`foreground worker returned invalid JSON\nstdout:\n${stdout}`, {
+        cause: error,
+      });
+    }
   } finally {
     if (child.exitCode === null) child.kill();
     await child.exited;
   }
 }
 
-async function waitForFile(path: string): Promise<void> {
-  while (
-    !(await access(path)
-      .then(() => true)
-      .catch(() => false))
-  ) {
+async function releaseStagedWorker(input: {
+  barrier: string;
+  requestId: string;
+  releaseDelayMs: number;
+  workerExited: Promise<number>;
+}): Promise<void> {
+  const polling = new AbortController();
+  const ready = waitForFile(`${input.barrier}.${input.requestId}.ready`, polling.signal);
+  let readinessTimer: ReturnType<typeof setTimeout> | undefined;
+  let releaseTimer: ReturnType<typeof setTimeout> | undefined;
+  const readinessTimeout = new Promise<never>((_resolve, reject) => {
+    readinessTimer = setTimeout(() => {
+      reject(new Error("staged worker readiness timed out"));
+    }, WORKER_READY_TIMEOUT_MS);
+  });
+  try {
+    const state = await Promise.race([
+      ready.then(() => "ready" as const),
+      input.workerExited.then(() => "exited" as const),
+      readinessTimeout,
+    ]);
+    if (readinessTimer !== undefined) {
+      clearTimeout(readinessTimer);
+      readinessTimer = undefined;
+    }
+    if (state === "exited") return;
+    const releaseDelay = new Promise<true>((resolve) => {
+      releaseTimer = setTimeout(() => resolve(true), input.releaseDelayMs);
+    });
+    const release = await Promise.race([releaseDelay, input.workerExited.then(() => false)]);
+    if (release) await writeFile(input.barrier, "release", "utf8");
+  } finally {
+    if (readinessTimer !== undefined) clearTimeout(readinessTimer);
+    if (releaseTimer !== undefined) clearTimeout(releaseTimer);
+    polling.abort();
+    await ready.catch(() => undefined);
+  }
+}
+
+async function waitForFile(path: string, signal: AbortSignal): Promise<void> {
+  while (true) {
+    signal.throwIfAborted();
+    if (
+      await access(path)
+        .then(() => true)
+        .catch(() => false)
+    ) {
+      return;
+    }
     await Bun.sleep(1);
   }
 }
@@ -263,25 +335,43 @@ describe("quota router end-to-end guarantees", () => {
       ],
     }));
     const barrier = join(fixture.directory, "staged-worker-release");
-    const release = (async () => {
-      await waitForFile(`${barrier}.staged-worker.ready`);
-      await Bun.sleep(5_100);
-      await writeFile(barrier, "release", "utf8");
-    })();
+    expect(
+      (
+        await selectPrimerFenceWorker({
+          fixture,
+          requestId: "staged-worker",
+          accountIds: "a,b",
+          startBarrier: { path: barrier, releaseDelayMs: 5_100 },
+        })
+      ).accountId,
+    ).toBe("b");
+  });
+
+  test("preserves worker failure output when a staged worker exits before ready", async () => {
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    const barrierParent = join(fixture.directory, "blocked-staged-worker-barrier");
+    await writeFile(barrierParent, "not a directory", "utf8");
+
+    let failure: unknown;
     try {
-      expect(
-        (
-          await selectPrimerFenceWorker({
-            fixture,
-            requestId: "staged-worker",
-            accountIds: "a,b",
-            environment: { PI_QUOTA_ROUTER_TEST_START_BARRIER: barrier },
-          })
-        ).accountId,
-      ).toBe("b");
-    } finally {
-      await release;
+      await selectPrimerFenceWorker({
+        fixture,
+        requestId: "failed-staged-worker",
+        startBarrier: {
+          path: join(barrierParent, "release"),
+          releaseDelayMs: 0,
+        },
+      });
+    } catch (error) {
+      failure = error;
     }
+
+    expect(failure).toBeInstanceOf(Error);
+    if (!(failure instanceof Error)) throw new Error("expected staged worker failure");
+    expect(failure.message).toContain("foreground worker exited with code");
+    expect(failure.message).toContain("EEXIST");
+    expect(failure.message).not.toContain("staged worker readiness timed out");
   });
 
   test("a held foreground worker fences primer acquisition across processes", async () => {
