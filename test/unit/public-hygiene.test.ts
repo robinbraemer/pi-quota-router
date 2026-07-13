@@ -8,6 +8,12 @@ describe("public hygiene release check", () => {
       stderr: "pipe",
     });
 
-    expect(await child.exited).toBe(0);
+    const [exitCode, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+
+    expect(exitCode, `${stdout}${stderr}`.trim()).toBe(0);
   });
 });

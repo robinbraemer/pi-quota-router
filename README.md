@@ -6,24 +6,24 @@ It refreshes reported 5-hour and weekly usage before automatic selection, classi
 
 ## Install from GitHub
 
-Install this extension through Pi's Git package support. It is not distributed through npm.
+This private repository is installed through Pi's Git package support. It is not distributed through npm. You need repository access for every install, update, and source link below.
 
-Install the current public version over HTTPS:
+SSH is the most reliable install method for collaborators:
 
 ```bash
-pi install git:https://github.com/robinbraemer/pi-quota-router.git
+pi install git:git@github.com:robinbraemer/pi-quota-router
 ```
 
-For repeatable installs, pin a released tag:
+If your Git credential helper already authenticates private GitHub HTTPS clones:
 
 ```bash
-pi install git:https://github.com/robinbraemer/pi-quota-router.git@<tag>
+pi install git:github.com/robinbraemer/pi-quota-router
 ```
 
-Or pin the exact commit you reviewed:
+For repeatable installs, pin the tag or exact commit you reviewed:
 
 ```bash
-pi install git:https://github.com/robinbraemer/pi-quota-router.git@a2a122c3ac9bde090061680c43ee738e7f7446b8
+pi install git:git@github.com:robinbraemer/pi-quota-router@<tag-or-commit>
 ```
 
 Restart Pi after installation. The extension supports normal Pi `>=0.80.6`, Node.js `>=22.19.0`, and Bun `>=1.3.7` for development and repository checks. It overrides only Pi's built-in `openai-codex` provider; it does not require a Pi fork or Lavish.
@@ -162,7 +162,7 @@ Pinned tag or commit installations stay at that revision. Re-run `pi install` wi
 Remove the extension while retaining its account vault and state:
 
 ```bash
-pi remove git:https://github.com/robinbraemer/pi-quota-router.git
+pi remove git:git@github.com:robinbraemer/pi-quota-router
 ```
 
 Pi removes the package registration/clone; `~/.pi/agent/pi-quota-router/` remains available for a later reinstall. To permanently delete all router credentials and state, first uninstall, close every Pi process, verify the printed path with `/quota-router path`, and then run:
@@ -178,7 +178,7 @@ That deletion cannot be undone.
 The repository uses Bun for dependency management, tests, and release checks:
 
 ```bash
-git clone https://github.com/robinbraemer/pi-quota-router.git
+git clone git@github.com:robinbraemer/pi-quota-router.git
 cd pi-quota-router
 bun install --frozen-lockfile --ignore-scripts
 bun run check
@@ -189,6 +189,6 @@ The source uses erasable TypeScript syntax and normal Pi public APIs. Developmen
 
 ## Support and security
 
-For operational problems, start with `/quota-router verify` and [Troubleshooting](docs/troubleshooting.md). To report a reproducible bug or request an improvement, open a [GitHub issue](https://github.com/robinbraemer/pi-quota-router/issues).
+For operational problems, start with `/quota-router verify` and [Troubleshooting](docs/troubleshooting.md). Repository collaborators can report a reproducible bug or request an improvement through [GitHub issues](https://github.com/robinbraemer/pi-quota-router/issues).
 
 For suspected vulnerabilities, do not include credentials, OAuth authorization URLs, account ids, or logs in a public issue. Use the private reporting route in [SECURITY.md](SECURITY.md).
