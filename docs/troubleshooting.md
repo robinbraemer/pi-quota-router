@@ -67,7 +67,8 @@ Follow the public HTTPS Git install instructions in the [README](../README.md#in
 pi --list-models openai-codex
 ```
 
-All normal Codex model ids should appear. CI verifies the local Git install path in an isolated Pi profile. On `main` pushes, it also verifies the exact pushed public commit through credential-free HTTPS.
+All normal Codex model ids should appear. The [CI release gate](../.github/workflows/ci.yml)
+verifies both local and credential-free public HTTPS Git installation in isolated Pi profiles.
 
 ## Safe resets
 
