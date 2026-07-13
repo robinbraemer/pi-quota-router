@@ -73,6 +73,24 @@ describe("recovery state", () => {
     expect(longer?.retryAt).toBe(NOW + 10_800_000);
   });
 
+  test("fresh available usage clears an explicit quota cooldown", () => {
+    const block = {
+      accountId: "a",
+      kind: "quota" as const,
+      blockedAt: NOW - 1,
+      retryAt: NOW + 3_600_000,
+      estimated: false,
+    };
+    const usage: UsageSnapshot = {
+      accountId: "a",
+      observedAt: NOW,
+      weeklyWindow: { usedPercent: 21, resetsAt: NOW + 604_800_000 },
+      stale: false,
+    };
+
+    expect(reconcileUsageBlock(block, usage, NOW)).toBeUndefined();
+  });
+
   test("fresh usage preserves estimated transient and auth cooldowns", () => {
     const usage = exhausted();
     const transient = blockFromFailure(

@@ -114,6 +114,44 @@ describe("RouterController", () => {
     await controller.shutdown();
   });
 
+  test("forced usage refresh clears an explicit quota block when quota is available", async () => {
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    const paths = resolveRouterPaths(fixture.directory);
+    const now = 2_000_000_000_000;
+    const credentials = makeCredentials("account-1", 3_000_000_000_000);
+    const controller = await createRouterController({
+      paths,
+      clock: () => now,
+      oauth: { refresh: async () => credentials },
+      fetchImpl: async () => Response.json(completeUsageResponse),
+      baseStream: () => eventStream(successfulText()),
+    });
+    const accountId = await controller.vault.addFromOAuth("work", credentials);
+    const stateStore = createAtomicJsonStore<RuntimeStateFile>({
+      path: paths.state,
+      schema: RuntimeStateFileSchema,
+      createDefault: () => structuredClone(defaultRuntimeState),
+    });
+    await stateStore.update((state) => ({
+      ...state,
+      blocks: [
+        {
+          accountId,
+          kind: "quota",
+          blockedAt: now - 1,
+          retryAt: now + 3_600_000,
+          estimated: false,
+        },
+      ],
+    }));
+
+    await controller.operations.refresh(accountId);
+
+    expect((await stateStore.read()).blocks).toEqual([]);
+    await controller.shutdown();
+  });
+
   test("force refreshes a credential after a usage 401", async () => {
     const fixture = await createStorageFixture();
     cleanups.push(fixture.cleanup);
