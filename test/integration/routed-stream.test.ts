@@ -11,6 +11,7 @@ import {
   createRoutedStream,
   type RoutedStreamDependencies,
 } from "../../src/stream/routed-stream.ts";
+import { resolveStreamSilenceTimeoutMs } from "../../src/stream/stream-silence.ts";
 import {
   eventStream,
   message,
@@ -254,10 +255,15 @@ describe("RoutedStream", () => {
       createRoutedStream(setup.value)(model, context, {
         signal: controller.signal,
         sessionId: "cancelled-session",
+        timeoutMs: Number.NaN,
       }),
     );
 
-    expect(events.at(-1)?.type).toBe("error");
+    const terminal = events.at(-1);
+    expect(terminal?.type).toBe("error");
+    if (terminal?.type !== "error") throw new Error("expected cancellation error event");
+    expect(terminal.reason).toBe("aborted");
+    expect(setup.selected).toEqual([]);
     expect(setup.succeeded).toEqual([]);
   });
 
@@ -469,7 +475,7 @@ describe("RoutedStream", () => {
     expect(setup.renewed.length).toBeGreaterThan(0);
   });
 
-  test("rotates a silent pre-output attempt after the configured deadline", async () => {
+  test("rotates a silent pre-output attempt after the per-request deadline", async () => {
     const timers = new FakeTimers();
     const controller = new AbortController();
     let entered: (() => void) | undefined;
@@ -505,16 +511,9 @@ describe("RoutedStream", () => {
       setup.renewed.push(leaseToken);
       return true;
     };
-    const routed = createRoutedStream(
-      Object.assign(setup.value, {
-        streamSilenceTimeouts: () => ({ preOutputMs: 10, postOutputMs: 10 }),
-        timers,
-      }) as RoutedStreamDependencies & {
-        streamSilenceTimeouts(): { preOutputMs: number; postOutputMs: number };
-        timers: ControlledTimers;
-      },
-    );
-    const stream = routed(model, context, { signal: controller.signal });
+    setup.value.timers = timers;
+    const routed = createRoutedStream(setup.value);
+    const stream = routed(model, context, { signal: controller.signal, timeoutMs: 45_000 });
     let settled = false;
     const result = stream.result().finally(() => {
       settled = true;
@@ -524,7 +523,10 @@ describe("RoutedStream", () => {
       await enteredAttempt;
       await firstRenewal;
       expect(settled).toBeFalse();
-      timers.advanceBy(20);
+      timers.advanceBy(44_999);
+      await flushAsyncWork();
+      expect(settled).toBeFalse();
+      timers.advanceBy(1);
       await flushAsyncWork();
 
       expect(settled).toBeTrue();
@@ -578,15 +580,8 @@ describe("RoutedStream", () => {
       setup.renewed.push(leaseToken);
       return true;
     };
-    const routed = createRoutedStream(
-      Object.assign(setup.value, {
-        streamSilenceTimeouts: () => ({ preOutputMs: 10, postOutputMs: 10 }),
-        timers,
-      }) as RoutedStreamDependencies & {
-        streamSilenceTimeouts(): { preOutputMs: number; postOutputMs: number };
-        timers: ControlledTimers;
-      },
-    );
+    setup.value.timers = timers;
+    const routed = createRoutedStream(setup.value);
     const stream = routed(model, context, { signal: controller.signal });
     let settled = false;
     const result = stream.result().finally(() => {
@@ -597,7 +592,10 @@ describe("RoutedStream", () => {
       await enteredAttempt;
       await firstRenewal;
       expect(settled).toBeFalse();
-      timers.advanceBy(20);
+      timers.advanceBy(299_999);
+      await flushAsyncWork();
+      expect(settled).toBeFalse();
+      timers.advanceBy(1);
       await flushAsyncWork();
 
       expect(settled).toBeTrue();
@@ -622,7 +620,7 @@ describe("RoutedStream", () => {
         entered = resolve;
       });
       if (timing === "at") {
-        timers.setTimeout(() => controller.abort(new Error("user cancelled")), 10);
+        timers.setTimeout(() => controller.abort(new Error("user cancelled")), 30_000);
       }
       const setup = dependencies(
         ["a"],
@@ -642,22 +640,15 @@ describe("RoutedStream", () => {
             });
           })() as unknown as ReturnType<RoutedStreamDependencies["baseStream"]>,
       );
-      const routed = createRoutedStream(
-        Object.assign(setup.value, {
-          streamSilenceTimeouts: () => ({ preOutputMs: 10, postOutputMs: 10 }),
-          timers,
-        }) as RoutedStreamDependencies & {
-          streamSilenceTimeouts(): { preOutputMs: number; postOutputMs: number };
-          timers: ControlledTimers;
-        },
-      );
-      const stream = routed(model, context, { signal: controller.signal });
+      setup.value.timers = timers;
+      const routed = createRoutedStream(setup.value);
+      const stream = routed(model, context, { signal: controller.signal, timeoutMs: 1 });
 
       await enteredAttempt;
       if (timing === "before") controller.abort(new Error("user cancelled"));
-      if (timing === "at") timers.advanceBy(10);
+      if (timing === "at") timers.advanceBy(30_000);
       if (timing === "after") {
-        timers.advanceBy(10);
+        timers.advanceBy(30_000);
         controller.abort(new Error("user cancelled"));
       }
       await flushAsyncWork();
@@ -691,19 +682,12 @@ describe("RoutedStream", () => {
           yield { type: "done", reason: "stop", message: message() } as AssistantMessageEvent;
         })() as unknown as ReturnType<RoutedStreamDependencies["baseStream"]>,
     );
-    const routed = createRoutedStream(
-      Object.assign(setup.value, {
-        streamSilenceTimeouts: () => ({ preOutputMs: 10, postOutputMs: 10 }),
-        timers,
-      }) as RoutedStreamDependencies & {
-        streamSilenceTimeouts(): { preOutputMs: number; postOutputMs: number };
-        timers: ControlledTimers;
-      },
-    );
-    const stream = routed(model, context);
+    setup.value.timers = timers;
+    const routed = createRoutedStream(setup.value);
+    const stream = routed(model, context, { timeoutMs: 300_001 });
 
     await flushAsyncWork();
-    timers.advanceBy(9);
+    timers.advanceBy(299_999);
     finish?.();
     await flushAsyncWork();
     timers.advanceBy(1);
@@ -713,6 +697,30 @@ describe("RoutedStream", () => {
     expect(terminal.stopReason).toBe("stop");
     expect(setup.released).toEqual(["lease-a"]);
     expect(timers.pending).toBe(0);
+  });
+
+  test("rejects invalid request timeouts before selecting an account", async () => {
+    let baseStreamCalls = 0;
+    const setup = dependencies(["a"], () => {
+      baseStreamCalls += 1;
+      return eventStream(successfulText());
+    });
+
+    const terminal = await createRoutedStream(setup.value)(model, context, {
+      timeoutMs: Number.NaN,
+    }).result();
+
+    expect(terminal.stopReason).toBe("error");
+    expect(setup.selected).toEqual([]);
+    expect(baseStreamCalls).toBe(0);
+  });
+
+  test("clamps request silence budgets to the supported range", () => {
+    expect(resolveStreamSilenceTimeoutMs(undefined)).toBe(300_000);
+    expect(resolveStreamSilenceTimeoutMs(0)).toBe(30_000);
+    expect(resolveStreamSilenceTimeoutMs(45_000.9)).toBe(45_000);
+    expect(resolveStreamSilenceTimeoutMs(300_001)).toBe(300_000);
+    expect(() => resolveStreamSilenceTimeoutMs(-1)).toThrow("Invalid timeoutMs: -1");
   });
 
   test("isolates renewal loss to the affected lease token", async () => {

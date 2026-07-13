@@ -140,8 +140,6 @@ export const RouterConfigSchema = z
     maxRotationAttempts: z.number().int().positive(),
     maxRecoveryWaitMs: z.number().int().nonnegative(),
     reservationTtlMs: z.number().int().positive(),
-    preOutputTimeoutMs: z.number().int().min(30_000).max(300_000).default(300_000),
-    postOutputIdleTimeoutMs: z.number().int().min(30_000).max(300_000).default(300_000),
     scoreHysteresisRatio: z.number().min(0).max(1),
     headroom: z
       .object({

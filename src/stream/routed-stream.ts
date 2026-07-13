@@ -17,6 +17,7 @@ import { ReplayBoundary } from "./replay-boundary.ts";
 import { canRotateBeforeOutput } from "./stream-attempt.ts";
 import {
   nextStreamEvent,
+  resolveStreamSilenceTimeoutMs,
   StreamSilenceTimeoutError,
   type StreamTimers,
   systemStreamTimers,
@@ -58,7 +59,6 @@ export interface RoutedStreamDependencies {
   release(leaseToken: string): Promise<void>;
   renew(leaseToken: string, ttlMs: number): Promise<boolean>;
   maxAttempts(): number;
-  streamSilenceTimeouts?(): { preOutputMs: number; postOutputMs: number };
   timers?: StreamTimers;
 }
 
@@ -83,6 +83,7 @@ export function createRoutedStream(
     const output = createAssistantMessageEventStream();
 
     void (async () => {
+      const streamSilenceTimeoutMs = resolveStreamSilenceTimeoutMs(options?.timeoutMs);
       const excludedAccountIds = new Set<string>();
       let lastFailure: unknown;
 
@@ -126,10 +127,7 @@ export function createRoutedStream(
             const deadline = createStreamDeadline({
               heartbeatSignal: heartbeat.signal,
               ...(options?.signal ? { externalSignal: options.signal } : {}),
-              timeouts: dependencies.streamSilenceTimeouts?.() ?? {
-                preOutputMs: 300_000,
-                postOutputMs: 300_000,
-              },
+              timeoutMs: streamSilenceTimeoutMs,
               timers: dependencies.timers ?? systemStreamTimers,
             });
             try {
@@ -364,7 +362,7 @@ function sanitizedErrorMessage(reason: "aborted" | "error", error: unknown): str
 function createStreamDeadline(options: {
   heartbeatSignal: AbortSignal;
   externalSignal?: AbortSignal;
-  timeouts: { preOutputMs: number; postOutputMs: number };
+  timeoutMs: number;
   timers: StreamTimers;
 }): {
   signal: AbortSignal;
@@ -382,13 +380,10 @@ function createStreamDeadline(options: {
     signal,
     arm(phase) {
       stop();
-      timer = options.timers.setTimeout(
-        () => {
-          if (options.externalSignal?.aborted || options.heartbeatSignal.aborted) return;
-          timeout.abort(new StreamSilenceTimeoutError(phase));
-        },
-        phase === "pre-output" ? options.timeouts.preOutputMs : options.timeouts.postOutputMs,
-      );
+      timer = options.timers.setTimeout(() => {
+        if (options.externalSignal?.aborted || options.heartbeatSignal.aborted) return;
+        timeout.abort(new StreamSilenceTimeoutError(phase));
+      }, options.timeoutMs);
     },
     stop,
   };

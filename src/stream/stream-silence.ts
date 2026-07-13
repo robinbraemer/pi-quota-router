@@ -13,6 +13,21 @@ export const systemStreamTimers: StreamTimers = {
   },
 };
 
+const DEFAULT_STREAM_SILENCE_TIMEOUT_MS = 300_000;
+const MIN_STREAM_SILENCE_TIMEOUT_MS = 30_000;
+const MAX_STREAM_SILENCE_TIMEOUT_MS = 300_000;
+
+export function resolveStreamSilenceTimeoutMs(timeoutMs: number | undefined): number {
+  if (timeoutMs === undefined) return DEFAULT_STREAM_SILENCE_TIMEOUT_MS;
+  if (!Number.isFinite(timeoutMs) || timeoutMs < 0) {
+    throw new Error(`Invalid timeoutMs: ${String(timeoutMs)}`);
+  }
+  return Math.min(
+    MAX_STREAM_SILENCE_TIMEOUT_MS,
+    Math.max(MIN_STREAM_SILENCE_TIMEOUT_MS, Math.floor(timeoutMs)),
+  );
+}
+
 export class StreamSilenceTimeoutError extends Error {
   override readonly name = "StreamSilenceTimeoutError";
 

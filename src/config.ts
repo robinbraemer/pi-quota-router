@@ -7,8 +7,6 @@ export const defaultConfig: RouterConfig = {
   maxRotationAttempts: 5,
   maxRecoveryWaitMs: 21_600_000,
   reservationTtlMs: 120_000,
-  preOutputTimeoutMs: 300_000,
-  postOutputIdleTimeoutMs: 300_000,
   scoreHysteresisRatio: 0.1,
   headroom: {
     shortWindowMinimumPercent: 10,

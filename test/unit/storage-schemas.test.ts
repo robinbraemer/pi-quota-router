@@ -34,6 +34,32 @@ const frozenOldV1Config = {
     retryCooldownMs: 3_600_000,
   },
 };
+const FrozenV1RouterConfigSchema = z
+  .object({
+    version: z.literal(1),
+    enabled: z.boolean(),
+    manualAccountId: z.string().min(1).optional(),
+    usageFreshnessMs: z.number().int().positive(),
+    maxRotationAttempts: z.number().int().positive(),
+    maxRecoveryWaitMs: z.number().int().nonnegative(),
+    reservationTtlMs: z.number().int().positive(),
+    scoreHysteresisRatio: z.number().min(0).max(1),
+    headroom: z
+      .object({
+        shortWindowMinimumPercent: z.number().min(0).max(100),
+        weeklyMinimumPercent: z.number().min(0).max(100),
+      })
+      .strict(),
+    priming: z
+      .object({
+        enabled: z.boolean(),
+        confirmedFirstUseRollingWindow: z.boolean(),
+        maximumPerSweep: z.number().int().positive(),
+        retryCooldownMs: z.number().int().positive(),
+      })
+      .strict(),
+  })
+  .strict();
 const frozenOldV1State = {
   version: 1 as const,
   usageSnapshots: [],
@@ -164,23 +190,16 @@ describe("router storage contracts", () => {
     });
   });
 
-  test("migrates persisted version-one config with bounded stream silence defaults", () => {
+  test("keeps version-one config readable by strict rollback versions", () => {
     expect(RouterConfigSchema.parse(defaultConfig)).toEqual(defaultConfig);
     expect(RuntimeStateFileSchema.parse(defaultRuntimeState)).toEqual(defaultRuntimeState);
-    expect(RouterConfigSchema.parse(frozenOldV1Config)).toEqual({
-      ...frozenOldV1Config,
-      preOutputTimeoutMs: 300_000,
-      postOutputIdleTimeoutMs: 300_000,
-    });
+    expect(RouterConfigSchema.parse(frozenOldV1Config)).toEqual(frozenOldV1Config);
+    expect(FrozenV1RouterConfigSchema.parse(defaultConfig)).toEqual(defaultConfig);
     expect(RuntimeStateFileSchema.parse(frozenOldV1State)).toEqual({
       ...frozenOldV1State,
       version: 2,
     });
-    expect(defaultConfig).toEqual({
-      ...frozenOldV1Config,
-      preOutputTimeoutMs: 300_000,
-      postOutputIdleTimeoutMs: 300_000,
-    });
+    expect(defaultConfig).toEqual(frozenOldV1Config);
     expect(defaultRuntimeState.version).toBe(2);
     expect(
       AccountVaultFileSchema.parse({
@@ -199,21 +218,6 @@ describe("router storage contracts", () => {
         ],
       }),
     ).toHaveProperty("accounts.0.label", "work");
-  });
-
-  test("rejects stream silence durations outside Pi's supported 30-second through 5-minute range", () => {
-    expect(() =>
-      RouterConfigSchema.parse({ ...defaultConfig, preOutputTimeoutMs: 29_999 }),
-    ).toThrow();
-    expect(() =>
-      RouterConfigSchema.parse({ ...defaultConfig, preOutputTimeoutMs: 300_001 }),
-    ).toThrow();
-    expect(() =>
-      RouterConfigSchema.parse({ ...defaultConfig, postOutputIdleTimeoutMs: 29_999 }),
-    ).toThrow();
-    expect(() =>
-      RouterConfigSchema.parse({ ...defaultConfig, postOutputIdleTimeoutMs: 300_001 }),
-    ).toThrow();
   });
 
   test("rejects unknown persisted fields", () => {
@@ -273,7 +277,7 @@ describe("router storage contracts", () => {
         stateStore: store,
         request: {
           candidates: [candidate("a", 2_000_000_000_000)],
-          config: RouterConfigSchema.parse(frozenOldV1Config),
+          config: frozenOldV1Config,
           now: 2_000_000_000_000,
         },
         owner: { processId: 1, sessionId: requestId, requestId },
@@ -340,11 +344,7 @@ describe("router storage contracts", () => {
       await store.update((state) => ({ ...state, reservations }));
       return selectAndReserve({
         stateStore: store,
-        request: {
-          candidates: [candidate("a", at)],
-          config: RouterConfigSchema.parse(frozenOldV1Config),
-          now: at,
-        },
+        request: { candidates: [candidate("a", at)], config: frozenOldV1Config, now: at },
         owner: { processId: 2, sessionId: "new", requestId },
         now: at,
       });
