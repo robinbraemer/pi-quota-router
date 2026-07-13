@@ -48,6 +48,7 @@ async function setup(options?: {
   reservationTtlMs?: number;
   clock?: () => number;
   wrapReservations?: (reservations: ReservationStore) => ReservationStore;
+  initial?: UsageSnapshot;
 }) {
   const fixture = await createStorageFixture();
   cleanups.push(fixture.cleanup);
@@ -74,7 +75,9 @@ async function setup(options?: {
     usage: {
       get: async () => {
         reads += 1;
-        return reads === 1 ? untouched() : (options?.refreshed ?? untouched());
+        return reads === 1
+          ? (options?.initial ?? untouched())
+          : (options?.refreshed ?? untouched());
       },
     },
     listAccountIds: async () => {
@@ -100,6 +103,21 @@ describe("PrimingController", () => {
   test("does not spend quota without both confirmations", async () => {
     const { controller, requests } = await setup();
     expect(await controller.primeAccount("a")).toEqual({ status: "not_authorized" });
+    expect(requests).toHaveLength(0);
+  });
+
+  test("does not prime a weekly-only account with an active reset clock", async () => {
+    const { controller, requests } = await setup({
+      authorized: true,
+      initial: {
+        accountId: "a",
+        observedAt: NOW,
+        weeklyWindow: { usedPercent: 3, resetsAt: NOW + 604_800_000 },
+        stale: false,
+      },
+    });
+
+    expect(await controller.primeAccount("a")).toEqual({ status: "not_candidate" });
     expect(requests).toHaveLength(0);
   });
 

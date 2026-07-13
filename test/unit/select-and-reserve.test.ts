@@ -65,7 +65,7 @@ describe("selectAndReserve", () => {
     expect(state.lastSelection?.candidates[0]?.rejectionCode).toBeUndefined();
   });
 
-  test("rejects a live account primer and makes its expiry recoverable", async () => {
+  test("rejects a live account primer", async () => {
     const fixture = await createStorageFixture();
     cleanups.push(fixture.cleanup);
     const store = createAtomicJsonStore<RuntimeStateFile>({
@@ -88,7 +88,6 @@ describe("selectAndReserve", () => {
     expect(result.reservation).toBeUndefined();
     expect(result.foregroundActiveBefore).toBeUndefined();
     expect(result.decision.candidates[0]?.rejectionCode).toBe("primer_active");
-    expect(result.recoverableAccountIds).toEqual(["a"]);
     expect((await store.read()).reservations).toHaveLength(1);
   });
 
@@ -187,188 +186,6 @@ describe("selectAndReserve", () => {
     });
 
     expect(result.reservation).toBeUndefined();
-    expect(result.recoverableAccountIds).toEqual(["a"]);
     expect(result.decision.candidates[0]?.rejectionCode).toBe("blocked");
-  });
-
-  test("does not mark policy-only rejection as recoverable", async () => {
-    const fixture = await createStorageFixture();
-    cleanups.push(fixture.cleanup);
-    const store = createAtomicJsonStore<RuntimeStateFile>({
-      path: fixture.file,
-      schema: RuntimeStateFileSchema,
-      createDefault: () => structuredClone(defaultRuntimeState),
-    });
-    await store.update((state) => ({
-      ...state,
-      blocks: [
-        {
-          accountId: "a",
-          kind: "quota",
-          blockedAt: NOW,
-          retryAt: NOW + 1000,
-          estimated: false,
-        },
-      ],
-    }));
-
-    const result = await selectAndReserve({
-      stateStore: store,
-      request: {
-        candidates: [candidate("a", NOW, { untouched: true })],
-        config: { ...defaultConfig, enabled: false },
-        now: NOW,
-      },
-      owner: { processId: 1, sessionId: "s", requestId: "r" },
-      now: NOW,
-    });
-
-    expect(result.reservation).toBeUndefined();
-    expect(result.recoverableAccountIds).toEqual([]);
-  });
-
-  test("keeps excluded blocked accounts in recovery accounting", async () => {
-    const fixture = await createStorageFixture();
-    cleanups.push(fixture.cleanup);
-    const store = createAtomicJsonStore<RuntimeStateFile>({
-      path: fixture.file,
-      schema: RuntimeStateFileSchema,
-      createDefault: () => structuredClone(defaultRuntimeState),
-    });
-    await store.update((state) => ({
-      ...state,
-      blocks: [
-        {
-          accountId: "a",
-          kind: "quota",
-          blockedAt: NOW,
-          retryAt: NOW + 1000,
-          estimated: false,
-        },
-      ],
-    }));
-
-    const result = await selectAndReserve({
-      stateStore: store,
-      request: { candidates: [candidate("a", NOW)], config: defaultConfig, now: NOW },
-      excludedAccountIds: new Set(["a"]),
-      owner: { processId: 1, sessionId: "s", requestId: "r" },
-      now: NOW,
-    });
-
-    expect(result.reservation).toBeUndefined();
-    expect(result.recoverableAccountIds).toEqual(["a"]);
-    expect(result.decision.candidates).toEqual([]);
-  });
-
-  test("recovers excluded accounts after their cooldown elapses", async () => {
-    const fixture = await createStorageFixture();
-    cleanups.push(fixture.cleanup);
-    const store = createAtomicJsonStore<RuntimeStateFile>({
-      path: fixture.file,
-      schema: RuntimeStateFileSchema,
-      createDefault: () => structuredClone(defaultRuntimeState),
-    });
-    await store.update((state) => ({
-      ...state,
-      blocks: [
-        {
-          accountId: "a",
-          kind: "transient",
-          blockedAt: NOW - 2000,
-          retryAt: NOW - 1000,
-          estimated: false,
-        },
-      ],
-    }));
-
-    const result = await selectAndReserve({
-      stateStore: store,
-      request: { candidates: [candidate("a", NOW)], config: defaultConfig, now: NOW },
-      excludedAccountIds: new Set(["a"]),
-      owner: { processId: 1, sessionId: "s", requestId: "r" },
-      now: NOW,
-    });
-
-    expect(result.reservation).toBeUndefined();
-    expect(result.recoverableAccountIds).toEqual(["a"]);
-    expect(result.decision.candidates).toEqual([]);
-  });
-
-  test("does not recover blocked accounts when routing is disabled", async () => {
-    const fixture = await createStorageFixture();
-    cleanups.push(fixture.cleanup);
-    const store = createAtomicJsonStore<RuntimeStateFile>({
-      path: fixture.file,
-      schema: RuntimeStateFileSchema,
-      createDefault: () => structuredClone(defaultRuntimeState),
-    });
-    await store.update((state) => ({
-      ...state,
-      blocks: [
-        {
-          accountId: "a",
-          kind: "quota",
-          blockedAt: NOW,
-          retryAt: NOW + 1000,
-          estimated: false,
-        },
-      ],
-    }));
-
-    const result = await selectAndReserve({
-      stateStore: store,
-      request: {
-        candidates: [candidate("a", NOW)],
-        config: { ...defaultConfig, enabled: false },
-        now: NOW,
-      },
-      owner: { processId: 1, sessionId: "s", requestId: "r" },
-      now: NOW,
-    });
-
-    expect(result.recoverableAccountIds).toEqual([]);
-  });
-
-  test("only recovers the forced account during manual routing", async () => {
-    const fixture = await createStorageFixture();
-    cleanups.push(fixture.cleanup);
-    const store = createAtomicJsonStore<RuntimeStateFile>({
-      path: fixture.file,
-      schema: RuntimeStateFileSchema,
-      createDefault: () => structuredClone(defaultRuntimeState),
-    });
-    await store.update((state) => ({
-      ...state,
-      blocks: [
-        {
-          accountId: "forced",
-          kind: "auth",
-          blockedAt: NOW,
-          estimated: false,
-        },
-        {
-          accountId: "other",
-          kind: "quota",
-          blockedAt: NOW,
-          retryAt: NOW + 1000,
-          estimated: false,
-        },
-      ],
-    }));
-
-    const result = await selectAndReserve({
-      stateStore: store,
-      request: {
-        candidates: [candidate("forced", NOW), candidate("other", NOW)],
-        config: { ...defaultConfig, manualAccountId: "forced" },
-        now: NOW,
-      },
-      owner: { processId: 1, sessionId: "s", requestId: "r" },
-      now: NOW,
-    });
-
-    expect(result.reservation).toBeUndefined();
-    expect(result.recoverableAccountIds).toEqual([]);
   });
 });

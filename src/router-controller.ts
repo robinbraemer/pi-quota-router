@@ -20,7 +20,6 @@ import {
   blockFromUsage,
   reconcileUsageBlock,
 } from "./recovery/recovery-state.ts";
-import { waitForRecovery } from "./recovery/wait-for-recovery.ts";
 import { createReservationStore } from "./routing/reservation-store.ts";
 import { selectAndReserve } from "./routing/select-and-reserve.ts";
 import { weeklyUrgency } from "./routing/selection-policy.ts";
@@ -284,6 +283,7 @@ export async function createRouterController(
             ...(block ? { block } : {}),
             untouched:
               snapshot !== undefined &&
+              snapshot.shortWindow !== undefined &&
               snapshot.shortWindow.usedPercent === 0 &&
               snapshot.weeklyWindow?.usedPercent === 0 &&
               snapshot.weeklyWindow.resetsAt === undefined &&
@@ -336,8 +336,6 @@ export async function createRouterController(
       return {
         kind: "unavailable",
         reason: selected.decision.reason,
-        recoverableAccountIds: selected.recoverableAccountIds,
-        knownAccountIds: summaries.map((account) => account.id),
       };
     },
     getFreshCredential: (accountId, signal) => vault.getFreshCredential(accountId, signal),
@@ -379,17 +377,6 @@ export async function createRouterController(
     },
     release: (leaseToken) => reservations.release(leaseToken).then(() => undefined),
     renew: (leaseToken, ttlMs) => reservations.renew(leaseToken, clock(), ttlMs),
-    recoveryDeadline: () => clock() + cachedConfig.maxRecoveryWaitMs,
-    waitForRecovery: (accountIds, knownAccountIds, deadline, signal) =>
-      waitForRecovery({
-        stateStore,
-        clock,
-        accountIds,
-        knownAccountIds,
-        listAccountIds: async () => (await vault.list()).map((account) => account.id),
-        deadline,
-        ...(signal ? { signal } : {}),
-      }),
     maxAttempts: () => cachedConfig.maxRotationAttempts,
   });
 
@@ -445,7 +432,9 @@ export async function createRouterController(
             const snapshot = usage.peek(account.id);
             const quota = snapshot
               ? [
-                  `5h ${remainingPercent(snapshot.shortWindow.usedPercent)}% remaining`,
+                  snapshot.shortWindow
+                    ? `5h ${remainingPercent(snapshot.shortWindow.usedPercent)}% remaining`
+                    : "5h n/a",
                   snapshot.weeklyWindow
                     ? `7d ${remainingPercent(snapshot.weeklyWindow.usedPercent)}% remaining`
                     : "7d quota unknown",

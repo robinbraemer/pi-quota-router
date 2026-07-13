@@ -537,9 +537,9 @@ Prove:
 - missing reset uses a one-hour estimate capped at six hours;
 - fresh usage may shorten an estimated quota cooldown without clearing authentication or transient blocks;
 - fresh usage does not erase a later live error observation;
-- all-blocked wait rechecks persisted state each minute;
-- wait returns when a peer clears state;
-- wait never exceeds six hours;
+- the standalone recovery helper rechecks persisted state each minute;
+- the standalone helper returns when a peer clears state;
+- the standalone helper never exceeds six hours;
 - caller abort ends immediately.
 
 **Step 3: Implement and verify**
@@ -579,7 +579,7 @@ Write failing tests showing:
 
 **Step 2: Write routed failover tests**
 
-Use a fake StreamFunction. Cover pre-output quota rotation, one forced token refresh for a first 401, definitive auth rotation, maximum five attempts, no account repeated before recovery, eligible accounts becoming retryable after cooldown, an all-limited recovery wait with one cumulative deadline, post-output error pass-through, exact event order, and signal propagation.
+Use a fake StreamFunction. Cover pre-output quota rotation, one forced token refresh for a first 401, definitive auth rotation, maximum five attempts, immediate all-limited termination, post-output error pass-through, exact event order, and signal propagation.
 
 **Step 3: Confirm the red state**
 
@@ -844,7 +844,7 @@ In isolated PI_CODING_AGENT_DIR directories, prove:
 - a primer cannot run without confirmation;
 - an authorized untouched account is primed once and enters normal routing;
 - invalid_grant stays excluded until reauthentication;
-- Ctrl-C aborts an all-limited wait;
+- Ctrl-C aborts the standalone recovery helper;
 - no fixture secret appears anywhere outside accounts.json.
 
 **Step 2: Add external package load smoke**

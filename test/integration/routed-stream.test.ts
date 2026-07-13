@@ -51,8 +51,6 @@ function dependencies(accounts: string[], baseStream: RoutedStreamDependencies["
         return {
           kind: "unavailable",
           reason: "no_eligible_accounts",
-          recoverableAccountIds: [],
-          knownAccountIds: accounts,
         };
       }
       selected.push(accountId);
@@ -86,8 +84,6 @@ function dependencies(accounts: string[], baseStream: RoutedStreamDependencies["
       renewed.push(leaseToken);
       return true;
     },
-    recoveryDeadline: () => 2_000_021_600_000,
-    waitForRecovery: async () => undefined,
     maxAttempts: () => 5,
   };
   return { value, selected, released, recorded, renewed, succeeded };
@@ -361,62 +357,108 @@ describe("RoutedStream", () => {
     expect(setup.recorded).toEqual([]);
   });
 
-  test("records a recoverable failure on the final attempt", async () => {
-    const setup = dependencies(["a"], () => eventStream([start(), quotaError()]));
+  test("reports actionable exhaustion when the final provider event fails before output", async () => {
+    const secret = "secret-final-event";
+    const setup = dependencies(["a"], () =>
+      eventStream([
+        start(),
+        {
+          type: "error",
+          reason: "error",
+          error: message("error", `usage limit reached ${secret}`),
+        },
+      ]),
+    );
     setup.value.maxAttempts = () => 1;
 
-    await collect(createRoutedStream(setup.value)(model, context));
+    const events = await collect(createRoutedStream(setup.value)(model, context));
+    const terminal = events.at(-1);
 
     expect(setup.recorded).toEqual(["a"]);
+    expect(terminal?.type).toBe("error");
+    if (terminal?.type === "error") {
+      expect(terminal.error.errorMessage).toBe(
+        "No Codex account is currently eligible; quota, usage data, or account health must recover before retrying",
+      );
+    }
+    expect(JSON.stringify(events)).not.toContain(secret);
   });
 
-  test("surfaces a non-recoverable selection decision without retrying", async () => {
-    const setup = dependencies([], () => eventStream(successfulText()));
-    let waits = 0;
-    setup.value.waitForRecovery = async () => {
-      waits += 1;
+  test("reports actionable exhaustion when the final provider iterator throws before output", async () => {
+    const secret = "secret-final-iterator";
+    const setup = dependencies(["a"], (() => {
+      throw new Error(`fetch failed ${secret}`);
+    }) as RoutedStreamDependencies["baseStream"]);
+    setup.value.maxAttempts = () => 1;
+
+    const events = await collect(createRoutedStream(setup.value)(model, context));
+    const terminal = events.at(-1);
+
+    expect(setup.recorded).toEqual(["a"]);
+    expect(terminal?.type).toBe("error");
+    if (terminal?.type === "error") {
+      expect(terminal.error.errorMessage).toBe(
+        "No Codex account is currently eligible; quota, usage data, or account health must recover before retrying",
+      );
+    }
+    expect(JSON.stringify(events)).not.toContain(secret);
+  });
+
+  test("reports actionable exhaustion when final credential loading fails before output", async () => {
+    const secret = "secret-final-credential";
+    const setup = dependencies(["a"], () => eventStream(successfulText()));
+    setup.value.getFreshCredential = async () => {
+      throw new Error(`fetch failed ${secret}`);
     };
+    setup.value.maxAttempts = () => 1;
+
+    const events = await collect(createRoutedStream(setup.value)(model, context));
+    const terminal = events.at(-1);
+
+    expect(setup.recorded).toEqual(["a"]);
+    expect(terminal?.type).toBe("error");
+    if (terminal?.type === "error") {
+      expect(terminal.error.errorMessage).toBe(
+        "No Codex account is currently eligible; quota, usage data, or account health must recover before retrying",
+      );
+    }
+    expect(JSON.stringify(events)).not.toContain(secret);
+  });
+
+  test("fails immediately when every account is temporarily unavailable", async () => {
+    const setup = dependencies(["a"], () => eventStream(successfulText()));
+    setup.value.selectAndReserve = async () => ({
+      kind: "unavailable",
+      reason: "no_eligible_accounts",
+    });
 
     const events = await collect(createRoutedStream(setup.value)(model, context));
 
     expect(events).toHaveLength(1);
     expect(events[0]?.type).toBe("error");
-    expect(waits).toBe(0);
+    if (events[0]?.type === "error") {
+      expect(events[0].error.errorMessage).toBe(
+        "No Codex account is currently eligible; quota, usage data, or account health must recover before retrying",
+      );
+    }
   });
 
-  test("reuses one recovery deadline across every wait in a routed request", async () => {
-    const setup = dependencies(["a"], () => eventStream(successfulText()));
-    let selections = 0;
-    let deadlines = 0;
-    const waitDeadlines: number[] = [];
-    setup.value.selectAndReserve = async () => {
-      selections += 1;
-      if (selections <= 2) {
-        return {
-          kind: "unavailable",
-          reason: "blocked",
-          recoverableAccountIds: ["a"],
-          knownAccountIds: ["a"],
-        };
-      }
-      return {
-        kind: "selected",
-        lease: { accountId: "a", leaseToken: "lease-a", reservationTtlMs: 120_000 },
-      };
-    };
-    setup.value.recoveryDeadline = () => {
-      deadlines += 1;
-      return 2_000_021_600_000;
-    };
-    setup.value.waitForRecovery = async (_accountIds, _knownAccountIds, deadline) => {
-      waitDeadlines.push(deadline);
-    };
+  test("reports an unavailable manual account distinctly", async () => {
+    const setup = dependencies([], () => eventStream(successfulText()));
+    setup.value.selectAndReserve = async () => ({
+      kind: "unavailable",
+      reason: "manual_account_unavailable",
+    });
 
     const events = await collect(createRoutedStream(setup.value)(model, context));
+    const terminal = events[0];
 
-    expect(events.at(-1)?.type).toBe("done");
-    expect(deadlines).toBe(1);
-    expect(waitDeadlines).toEqual([2_000_021_600_000, 2_000_021_600_000]);
+    expect(terminal?.type).toBe("error");
+    if (terminal?.type === "error") {
+      expect(terminal.error.errorMessage).toBe(
+        "The selected Codex account is currently unavailable",
+      );
+    }
   });
 
   test("renews a lease while a request remains active", async () => {
@@ -511,8 +553,15 @@ describe("RoutedStream", () => {
       eventStream([start(), quotaError()]),
     );
     const events = await collect(createRoutedStream(setup.value)(model, context));
+    const terminal = events.at(-1);
 
     expect(setup.selected).toHaveLength(5);
-    expect(events.map((event) => event.type)).toEqual(["start", "error"]);
+    expect(events.map((event) => event.type)).toEqual(["error"]);
+    expect(terminal?.type).toBe("error");
+    if (terminal?.type === "error") {
+      expect(terminal.error.errorMessage).toBe(
+        "No Codex account is currently eligible; quota, usage data, or account health must recover before retrying",
+      );
+    }
   });
 });

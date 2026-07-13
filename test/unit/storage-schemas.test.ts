@@ -164,13 +164,16 @@ describe("router storage contracts", () => {
     });
   });
 
-  test("accepts valid version-one files", () => {
+  test("accepts version-one config and migrates version-one runtime state", () => {
     expect(RouterConfigSchema.parse(defaultConfig)).toEqual(defaultConfig);
     expect(RuntimeStateFileSchema.parse(defaultRuntimeState)).toEqual(defaultRuntimeState);
     expect(RouterConfigSchema.parse(frozenOldV1Config)).toEqual(frozenOldV1Config);
-    expect(RuntimeStateFileSchema.parse(frozenOldV1State)).toEqual(frozenOldV1State);
+    expect(RuntimeStateFileSchema.parse(frozenOldV1State)).toEqual({
+      ...frozenOldV1State,
+      version: 2,
+    });
     expect(defaultConfig).toEqual(frozenOldV1Config);
-    expect(defaultRuntimeState).toEqual(frozenOldV1State);
+    expect(defaultRuntimeState.version).toBe(2);
     expect(
       AccountVaultFileSchema.parse({
         version: 1,
@@ -199,13 +202,48 @@ describe("router storage contracts", () => {
     ).toThrow();
   });
 
-  test("keeps produced multi-foreground state readable by the frozen version-one schema", async () => {
+  test("round-trips weekly-only version-two usage without accepting empty snapshots", () => {
+    const weeklyOnly = {
+      accountId: "codex-weekly",
+      observedAt: 2_000_000_000_000,
+      weeklyWindow: { usedPercent: 3, resetsAt: 2_000_604_800_000 },
+      stale: false,
+      planType: "pro",
+    };
+    expect(
+      RuntimeStateFileSchema.parse({
+        ...defaultRuntimeState,
+        usageSnapshots: [weeklyOnly],
+      }).usageSnapshots,
+    ).toEqual([weeklyOnly]);
+
+    expect(() =>
+      RuntimeStateFileSchema.parse({
+        ...defaultRuntimeState,
+        usageSnapshots: [
+          {
+            accountId: "codex-empty",
+            observedAt: 2_000_000_000_000,
+            stale: false,
+          },
+        ],
+      }),
+    ).toThrow();
+    expect(() =>
+      RuntimeStateFileSchema.parse({
+        ...defaultRuntimeState,
+        unsupported: true,
+      }),
+    ).toThrow();
+  });
+
+  test("preserves multi-foreground reservations after version-one migration", async () => {
     const fixture = await createStorageFixture();
     cleanups.push(fixture.cleanup);
     const store = createAtomicJsonStore<RuntimeStateFile>({
       path: fixture.file,
       schema: RuntimeStateFileSchema,
-      createDefault: () => structuredClone(frozenOldV1State),
+      createDefault: () => RuntimeStateFileSchema.parse(structuredClone(frozenOldV1State)),
     });
     for (const requestId of ["one", "two"]) {
       await selectAndReserve({
@@ -221,8 +259,8 @@ describe("router storage contracts", () => {
     }
     const state = await store.read();
 
-    expect(RuntimeStateFileSchema.parse(state).version).toBe(1);
-    expect(FrozenV1RuntimeStateSchema.parse(state).reservations).toHaveLength(2);
+    expect(RuntimeStateFileSchema.parse(state).version).toBe(2);
+    expect(state.reservations).toHaveLength(2);
     expect(state.reservations[0]?.accountId).toBe(state.reservations[1]?.accountId);
     expect(state.reservations.some((reservation) => reservation.kind === "foreground")).toBeTrue();
     const text = JSON.stringify(state);
@@ -274,7 +312,7 @@ describe("router storage contracts", () => {
       const store = createAtomicJsonStore<RuntimeStateFile>({
         path: fixture.file,
         schema: RuntimeStateFileSchema,
-        createDefault: () => structuredClone(frozenOldV1State),
+        createDefault: () => RuntimeStateFileSchema.parse(structuredClone(frozenOldV1State)),
       });
       await store.update((state) => ({ ...state, reservations }));
       return selectAndReserve({

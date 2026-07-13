@@ -28,7 +28,7 @@ The router does not merely choose the lowest usage percentage. It:
 - Route automatically among equivalent Codex OAuth accounts.
 - Optimize effective usable quota over time rather than evenly balancing percentages.
 - Support one-shot priming when the operator explicitly confirms both quota spend and first-use rolling-window behavior for that invocation.
-- Avoid starting work on an account that lacks conservative 5-hour or weekly headroom.
+- Avoid starting work below conservative weekly headroom or, when reported, 5-hour headroom.
 - Keep routing deterministic, explainable, observable, abortable, and safe under multiple Pi processes.
 - Recover transparently from pre-output quota, authentication, and token-refresh failures.
 - Provide a coherent `/quota-router` command family and a compact footer.
@@ -72,7 +72,6 @@ Borrow reliability mechanisms:
 - Persisted cooldowns and invalidation state.
 - Distinguishing transient auth failures from definitive revocation.
 - Bounded structured diagnostic log with credential redaction.
-- All-limited wake-up behavior and cancellation semantics.
 - Anti-ping-pong logic, stuck-work guards, and circuit-breaker thinking.
 - Account identity deduplication by stable Codex `accountId`.
 - Usage freshness reconciliation when an estimated quota cooldown is pessimistic.
@@ -233,12 +232,12 @@ The provider override is the only component coupled to Pi's streaming types. Sel
 - Marks replay unsafe only after text, thinking, or tool-call content starts.
 - On a pre-output quota/auth error, blocks the account, releases the lease, and retries another account up to five times.
 - On a classified post-output failure, records the account block and forwards the error unchanged without replaying.
-- If all accounts are temporarily blocked before output, waits abortably for the earliest recovery up to the configured limit (six hours by default).
-- Reuses one absolute recovery deadline across every wait in the routed request and resumes when any recoverable account becomes available.
+- If fresh selection finds no eligible account before output, emits one sanitized terminal error immediately.
+- Leaves recovery to a later request, which starts a new fresh selection pass.
 
 ### `src/status/status-controller.ts`
 
-- Renders a compact footer with active account, 5-hour remaining, weekly remaining, reset countdown, urgency, and routing mode.
+- Renders a compact footer with active account, reported 5-hour remaining or `n/a`, weekly remaining, reset countdown, urgency, and routing mode.
 - Uses cached data without triggering a usage refresh.
 - Keeps rendering independent from routing success.
 
@@ -314,6 +313,8 @@ Defaults:
 - `headroom.weeklyMinimumPercent`: `3`
 - `priming.enabled`: `false`
 - `priming.confirmedFirstUseRollingWindow`: `false`
+
+`maxRecoveryWaitMs` is retained as a reserved version-one compatibility field. It has no effect on foreground routing; removing it requires a versioned config migration.
 - `priming.maximumPerSweep`: `1`
 - `priming.retryCooldownMs`: `3600000`
 
@@ -332,7 +333,7 @@ Contains no credentials:
 - A reserved events array for schema compatibility; current diagnostics are written to `events.ndjson`.
 - Schema version.
 
-The version-one schema persists `usageSnapshots` for restart-safe cached quota state and reserves `events` for compatibility. Operational diagnostics are written to `events.ndjson`.
+Runtime state version two persists `usageSnapshots` for restart-safe cached quota state and permits a weekly-only snapshot. Strict version-one state is accepted and migrated losslessly in memory; the credential vault and config remain version one. Operational diagnostics are written to `events.ndjson`.
 
 ## Selection policy
 
@@ -341,7 +342,7 @@ The version-one schema persists `usageSnapshots` for restart-safe cached quota s
 For each account:
 
 - Freshness and fetch result.
-- 5-hour used percentage and reset time.
+- Reported 5-hour used percentage and reset time, when present.
 - Weekly used percentage and reset time.
 - Account availability, auth health, and cooldown.
 - Primer state.
@@ -358,7 +359,7 @@ An account is ineligible when:
 - Another live request owns its reservation.
 - Its usage is unknown or older than 24 hours.
 - Its weekly reset timestamp is missing or has elapsed without fresh post-reset usage.
-- Its remaining 5-hour quota is below 10%.
+- Its reported remaining 5-hour quota is below 10%.
 - Its remaining weekly quota is below 3%.
 - It is untouched without a weekly reset clock and has not been successfully primed.
 
@@ -381,7 +382,7 @@ Higher urgency wins because it represents more quota that must be spent per hour
 Candidates within 10% of the highest urgency are materially tied. If the last successfully completed routed account is in that band and passes all eligibility checks, retain it first to preserve prompt-cache affinity. A login display update or failed route does not change this history. Otherwise resolve the band in this order:
 
 1. Least weekly remaining quota that still passes the 3% headroom floor.
-2. Most 5-hour remaining quota.
+2. Most 5-hour remaining quota when both tied candidates report that window.
 3. Stable account id lexical order for deterministic behavior.
 
 This avoids account churn for negligible score improvements while keeping selection deterministic when the last successful account is not retained.
@@ -402,7 +403,7 @@ Priming is intentional quota spend, not quota inspection.
 
 An account is a priming candidate only when a fresh usage snapshot shows:
 
-- 0% used in both active windows.
+- 0% used in both a reported 5-hour window and the weekly window.
 - No observed weekly reset timestamp.
 - Healthy authentication.
 - No cooldown, reservation, or prior successful primer.
@@ -457,13 +458,9 @@ After model-visible output begins, the wrapper forwards the provider error and n
 
 ### All accounts unavailable
 
-Before any output, the wrapper waits for the earliest known recovery when:
+Before any output, fresh selection that finds no eligible account emits one terminal `RouteUnavailableError` and closes the stream. Automatic selection reports `No Codex account is currently eligible; quota, usage data, or account health must recover before retrying`; an unavailable manual override reports `The selected Codex account is currently unavailable`.
 
-- At least one account is temporarily blocked rather than permanently invalid.
-- The wait remains inside the configured limit, which defaults to six hours.
-- The caller's abort signal remains active.
-
-The wait re-checks persisted state and the managed account list at most once per minute, so a peer process login, refresh, usage correction, or reservation release can wake the request as soon as any recoverable account is available. Every wait in one routed request shares one cumulative configured deadline. Escape/user abort ends the wait immediately.
+The wrapper does not retain the old request while waiting for a reset, peer login, usage correction, or reservation release. A later request observes those changes through a new selection pass.
 
 ## Concurrency model
 
@@ -506,7 +503,7 @@ The footer shows:
 Codex · work@example · 5h 72% · 7d 41%/18h · urgent 0.023/h · auto
 ```
 
-The final field is `auto`, `manual`, or `login`; unknown cached usage or reset values render as `?`.
+The final field is `auto`, `manual`, or `login`; unknown cached usage or reset values render as `?`, while an unreported five-hour limit renders as `5h n/a`.
 
 ## Persistence and security
 
@@ -531,7 +528,7 @@ Each atomic selection persists a credential-free `lastSelection` explanation in 
 
 - Near-reset high remaining quota beats lower remaining quota with a distant reset.
 - Similar urgency drains the least weekly remaining account.
-- Short-window headroom vetoes a weekly winner.
+- Reported short-window headroom vetoes a weekly winner.
 - Manual selection wins while healthy.
 - Stale data is penalized and fresh data wins.
 - Untouched/no-clock accounts are excluded until primed or manually selected.
@@ -555,10 +552,10 @@ Each atomic selection persists a credential-free `lastSelection` explanation in 
 - Pre-output quota failure rotates and replays once.
 - A transport `start` event does not prohibit replay.
 - Text, thinking, or tool-call start prohibits replay.
-- Abort cancels the caller's usage wait, token refresh wait, provider stream, and recovery sleep; a shared usage fetch remains alive for other callers.
+- Abort cancels the caller's usage wait, token refresh wait, and provider stream; a shared usage fetch remains alive for other callers.
 - Maximum rotation attempts is enforced.
-- All-limited wait wakes on the first recovered account.
-- No permanent-invalid account participates in waiting.
+- Unavailable selection fails promptly without holding a foreground request open.
+- No permanent-invalid account participates in automatic selection.
 
 ### Auth and concurrency tests
 
@@ -572,7 +569,7 @@ Each atomic selection persists a credential-free `lastSelection` explanation in 
 - Successful reauthentication clears the account's permanent auth block.
 - Stale auth failures cannot invalidate credentials installed by a concurrent re-login.
 - Forced fresh non-exhausted usage clears an estimated quota cooldown without clearing authentication or transient blocks.
-- Recovery waiting notices an account added by a peer.
+- A later request notices an account added by a peer.
 
 ### Storage tests
 
@@ -626,7 +623,7 @@ A release is blocked unless:
 - High remaining quota near reset is spent before less urgent quota.
 - Similar-urgency accounts drain the least weekly remaining safe account.
 - Synthetic primer spend occurs only after explicit confirmation and is verified from fresh usage.
-- No task starts below the configured 5-hour or weekly headroom floor unless manually forced.
+- No task starts below the configured weekly headroom floor or a reported 5-hour headroom floor unless manually forced.
 - Parallel Pi processes do not select the same free account concurrently.
 - Token refresh races cannot burn a rotating refresh token.
 - Failover before output is transparent; failover after output never replays.
