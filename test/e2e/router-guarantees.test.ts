@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { appendFile, readdir, readFile } from "node:fs/promises";
+import { access, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   type AssistantMessageEvent,
@@ -50,6 +50,54 @@ setDefaultTimeout(30_000);
 afterEach(async () => {
   await Promise.all(cleanups.splice(0).map((cleanup) => cleanup()));
 });
+
+async function selectPrimerFenceWorker(input: {
+  fixture: { directory: string; file: string };
+  requestId: string;
+  accountIds?: string;
+  environment?: Record<string, string>;
+}): Promise<{ accountId?: string }> {
+  const worker = new URL("../helpers/worker-select.ts", import.meta.url).pathname;
+  const child = Bun.spawn(
+    [
+      process.execPath,
+      worker,
+      input.fixture.file,
+      input.requestId,
+      input.accountIds ?? "a",
+      "false",
+    ],
+    {
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, ...input.environment },
+    },
+  );
+  const result = Promise.all([
+    child.exited,
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+  ]);
+  try {
+    const [exitCode, stdout, stderr] = await result;
+    expect(exitCode).toBe(0);
+    expect(stderr).toBe("");
+    return JSON.parse(stdout) as { accountId?: string };
+  } finally {
+    if (child.exitCode === null) child.kill();
+    await child.exited;
+  }
+}
+
+async function waitForFile(path: string): Promise<void> {
+  while (
+    !(await access(path)
+      .then(() => true)
+      .catch(() => false))
+  ) {
+    await Bun.sleep(1);
+  }
+}
 
 describe("quota router end-to-end guarantees", () => {
   test("selects a healthy account only after fetching fresh usage", async () => {
@@ -167,85 +215,8 @@ describe("quota router end-to-end guarantees", () => {
         },
       ],
     }));
-    const worker = new URL("../helpers/worker-select.ts", import.meta.url).pathname;
-    const select = async (requestId: string, accountIds = "a") => {
-      const diagnosticPath = join(fixture.directory, `primer-fence-${requestId}.jsonl`);
-      const startedAt = process.hrtime.bigint();
-      const diagnostic = async (
-        stage: string,
-        detail?: Record<string, number | string | boolean | null | string[]>,
-      ) => {
-        await appendFile(
-          diagnosticPath,
-          `${JSON.stringify({
-            source: "parent",
-            stage,
-            elapsedMs: Number(process.hrtime.bigint() - startedAt) / 1_000_000,
-            processId: process.pid,
-            ...detail,
-          })}\n`,
-          "utf8",
-        );
-      };
-      await diagnostic("spawn-requested");
-      const child = Bun.spawn(
-        [process.execPath, worker, fixture.file, requestId, accountIds, "false"],
-        {
-          stdout: "pipe",
-          stderr: "pipe",
-          env: { ...process.env, PI_QUOTA_ROUTER_TEST_DIAGNOSTIC_PATH: diagnosticPath },
-        },
-      );
-      await diagnostic("child-pid-available", { childPid: child.pid });
-      const result = Promise.all([
-        child.exited.then(async (exitCode) => {
-          await diagnostic("child-exit-settled", { exitCode });
-          return exitCode;
-        }),
-        new Response(child.stdout).text().then(async (stdout) => {
-          await diagnostic("stdout-closed", { bytes: stdout.length });
-          return stdout;
-        }),
-        new Response(child.stderr).text().then(async (stderr) => {
-          await diagnostic("stderr-closed", { bytes: stderr.length });
-          return stderr;
-        }),
-      ]);
-      let deadlineSnapshot: { childExitCode: number | null; parentResources: string[] } | undefined;
-      try {
-        const [exitCode, stdout, stderr] = await Promise.race([
-          result,
-          Bun.sleep(5_000).then(async () => {
-            deadlineSnapshot = {
-              childExitCode: child.exitCode,
-              parentResources: process.getActiveResourcesInfo().sort(),
-            };
-            await diagnostic("deadline", deadlineSnapshot);
-            throw new Error("foreground worker timed out");
-          }),
-        ]);
-        expect(exitCode).toBe(0);
-        expect(stderr).toBe("");
-        return JSON.parse(stdout) as { accountId?: string };
-      } catch (error) {
-        if (!deadlineSnapshot) throw error;
-        if (child.exitCode === null) child.kill();
-        const [exitCode, stdout, stderr] = await result;
-        await diagnostic("timeout-cleanup-settled", {
-          exitCode,
-          stdoutBytes: stdout.length,
-          stderrBytes: stderr.length,
-        });
-        const stages = await readFile(diagnosticPath, "utf8").catch(() => "");
-        throw new Error(
-          `foreground worker timed out; diagnostics=${JSON.stringify({ deadlineSnapshot, stages })}`,
-          { cause: error },
-        );
-      } finally {
-        if (child.exitCode === null) child.kill();
-        await child.exited;
-      }
-    };
+    const select = (requestId: string, accountIds = "a") =>
+      selectPrimerFenceWorker({ fixture, requestId, accountIds });
 
     expect((await select("primer-blocked", "a,b")).accountId).toBe("b");
     expect((await stateStore.read()).lastSelection?.candidates[0]?.rejectionCode).toBe(
@@ -268,6 +239,49 @@ describe("quota router end-to-end guarantees", () => {
       ],
     }));
     expect((await select("sweep-does-not-veto")).accountId).toBe("a");
+  });
+
+  test("waits for a staged healthy foreground worker before asserting primer fencing", async () => {
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    const stateStore = createAtomicJsonStore<RuntimeStateFile>({
+      path: fixture.file,
+      schema: RuntimeStateFileSchema,
+      createDefault: () => structuredClone(defaultRuntimeState),
+    });
+    await stateStore.update((state) => ({
+      ...state,
+      reservations: [
+        {
+          accountId: "a",
+          leaseToken: "synthetic-staged-primer",
+          owner: { processId: 7, sessionId: "primer", requestId: "primer" },
+          createdAt: NOW,
+          expiresAt: NOW + 60_000,
+          kind: "primer",
+        },
+      ],
+    }));
+    const barrier = join(fixture.directory, "staged-worker-release");
+    const release = (async () => {
+      await waitForFile(`${barrier}.staged-worker.ready`);
+      await Bun.sleep(5_100);
+      await writeFile(barrier, "release", "utf8");
+    })();
+    try {
+      expect(
+        (
+          await selectPrimerFenceWorker({
+            fixture,
+            requestId: "staged-worker",
+            accountIds: "a,b",
+            environment: { PI_QUOTA_ROUTER_TEST_START_BARRIER: barrier },
+          })
+        ).accountId,
+      ).toBe("b");
+    } finally {
+      await release;
+    }
   });
 
   test("a held foreground worker fences primer acquisition across processes", async () => {
