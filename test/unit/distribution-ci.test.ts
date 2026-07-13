@@ -22,6 +22,9 @@ describe("distribution CI", () => {
     expect(publicSmoke).toContain(
       `PI_QUOTA_ROUTER_GIT_REVISION: \${{ github.event.pull_request.head.sha || github.sha }}`,
     );
+    expect(publicSmoke).toContain(
+      `PI_QUOTA_ROUTER_GIT_SOURCE: git:\${{ github.event.pull_request.head.repo.clone_url || 'https://github.com/robinbraemer/pi-quota-router.git' }}`,
+    );
     expect(workflow).not.toContain("x-access-token:");
     expect(workflow).not.toContain("github.token");
     expect(workflow).toContain('PI_QUOTA_ROUTER_CREDENTIAL_FREE: "1"');
