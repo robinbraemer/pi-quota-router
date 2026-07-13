@@ -5,16 +5,22 @@ import { join } from "node:path";
 const repository = join(import.meta.dir, "../..");
 
 describe("distribution CI", () => {
-  test("uses credential-free public HTTPS Git install smoke on main", async () => {
+  test("uses credential-free public HTTPS Git install smoke on pull requests and main", async () => {
     const [workflow, smokeInstall] = await Promise.all([
       readFile(join(repository, ".github/workflows/ci.yml"), "utf8"),
       readFile(join(repository, "scripts/smoke-install.ts"), "utf8"),
     ]);
 
     expect(workflow).toContain("Smoke-test Pi's local Git install path");
-    expect(workflow).toContain("Smoke-test Pi's public HTTPS Git install path");
-    expect(workflow).toContain(
-      "if: github.event_name == 'push' && github.ref == 'refs/heads/main'",
+    const publicSmoke = workflow.match(
+      /- name: Smoke-test Pi's public HTTPS Git install path[\s\S]*?run: bun run smoke:install/,
+    )?.[0];
+    expect(publicSmoke).toBeDefined();
+    expect(publicSmoke).toContain(
+      "if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')",
+    );
+    expect(publicSmoke).toContain(
+      `PI_QUOTA_ROUTER_GIT_REVISION: \${{ github.event.pull_request.head.sha || github.sha }}`,
     );
     expect(workflow).not.toContain("x-access-token:");
     expect(workflow).not.toContain("github.token");
