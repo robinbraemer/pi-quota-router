@@ -62,13 +62,14 @@ Ctrl-C/Escape aborts active usage and provider work. Active reservations renew o
 
 ## Installation problems
 
-Follow the private SSH or authenticated HTTPS install instructions in the [README](../README.md#install-from-github). `pi list` should show the Git source. If model listing fails, run:
+Follow the public HTTPS Git install instructions in the [README](../README.md#install-from-github). `pi list` should show the Git source. If model listing fails, run:
 
 ```bash
 pi --list-models openai-codex
 ```
 
-All normal Codex model ids should appear. CI verifies the local Git install path in an isolated Pi profile. On trusted `main` pushes, it also verifies the exact pushed commit through authenticated GitHub access.
+All normal Codex model ids should appear. The [CI release gate](../.github/workflows/ci.yml)
+verifies both local and credential-free public HTTPS Git installation in isolated Pi profiles.
 
 ## Safe resets
 

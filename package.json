@@ -2,6 +2,16 @@
   "name": "@robinbraemer/pi-quota-router",
   "version": "0.1.0",
   "description": "Quota-aware multi-account routing for normal Pi",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/robinbraemer/pi-quota-router.git"
+  },
+  "homepage": "https://github.com/robinbraemer/pi-quota-router#readme",
+  "bugs": "https://github.com/robinbraemer/pi-quota-router/issues",
+  "publishConfig": {
+    "access": "public"
+  },
   "keywords": [
     "pi-package"
   ],
