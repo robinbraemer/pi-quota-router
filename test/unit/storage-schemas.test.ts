@@ -164,15 +164,23 @@ describe("router storage contracts", () => {
     });
   });
 
-  test("accepts version-one config and migrates version-one runtime state", () => {
+  test("migrates persisted version-one config with bounded stream silence defaults", () => {
     expect(RouterConfigSchema.parse(defaultConfig)).toEqual(defaultConfig);
     expect(RuntimeStateFileSchema.parse(defaultRuntimeState)).toEqual(defaultRuntimeState);
-    expect(RouterConfigSchema.parse(frozenOldV1Config)).toEqual(frozenOldV1Config);
+    expect(RouterConfigSchema.parse(frozenOldV1Config)).toEqual({
+      ...frozenOldV1Config,
+      preOutputTimeoutMs: 300_000,
+      postOutputIdleTimeoutMs: 300_000,
+    });
     expect(RuntimeStateFileSchema.parse(frozenOldV1State)).toEqual({
       ...frozenOldV1State,
       version: 2,
     });
-    expect(defaultConfig).toEqual(frozenOldV1Config);
+    expect(defaultConfig).toEqual({
+      ...frozenOldV1Config,
+      preOutputTimeoutMs: 300_000,
+      postOutputIdleTimeoutMs: 300_000,
+    });
     expect(defaultRuntimeState.version).toBe(2);
     expect(
       AccountVaultFileSchema.parse({
@@ -191,6 +199,21 @@ describe("router storage contracts", () => {
         ],
       }),
     ).toHaveProperty("accounts.0.label", "work");
+  });
+
+  test("rejects stream silence durations outside Pi's supported 30-second through 5-minute range", () => {
+    expect(() =>
+      RouterConfigSchema.parse({ ...defaultConfig, preOutputTimeoutMs: 29_999 }),
+    ).toThrow();
+    expect(() =>
+      RouterConfigSchema.parse({ ...defaultConfig, preOutputTimeoutMs: 300_001 }),
+    ).toThrow();
+    expect(() =>
+      RouterConfigSchema.parse({ ...defaultConfig, postOutputIdleTimeoutMs: 29_999 }),
+    ).toThrow();
+    expect(() =>
+      RouterConfigSchema.parse({ ...defaultConfig, postOutputIdleTimeoutMs: 300_001 }),
+    ).toThrow();
   });
 
   test("rejects unknown persisted fields", () => {
@@ -250,7 +273,7 @@ describe("router storage contracts", () => {
         stateStore: store,
         request: {
           candidates: [candidate("a", 2_000_000_000_000)],
-          config: frozenOldV1Config,
+          config: RouterConfigSchema.parse(frozenOldV1Config),
           now: 2_000_000_000_000,
         },
         owner: { processId: 1, sessionId: requestId, requestId },
@@ -317,7 +340,11 @@ describe("router storage contracts", () => {
       await store.update((state) => ({ ...state, reservations }));
       return selectAndReserve({
         stateStore: store,
-        request: { candidates: [candidate("a", at)], config: frozenOldV1Config, now: at },
+        request: {
+          candidates: [candidate("a", at)],
+          config: RouterConfigSchema.parse(frozenOldV1Config),
+          now: at,
+        },
         owner: { processId: 2, sessionId: "new", requestId },
         now: at,
       });

@@ -372,6 +372,10 @@ export async function createRouterController(
     release: (leaseToken) => reservations.release(leaseToken).then(() => undefined),
     renew: (leaseToken, ttlMs) => reservations.renew(leaseToken, clock(), ttlMs),
     maxAttempts: () => cachedConfig.maxRotationAttempts,
+    streamSilenceTimeouts: () => ({
+      preOutputMs: cachedConfig.preOutputTimeoutMs,
+      postOutputMs: cachedConfig.postOutputIdleTimeoutMs,
+    }),
   });
 
   const statusText = async (): Promise<string> => {

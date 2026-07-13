@@ -7,6 +7,8 @@ export interface RouterConfig {
   /** Reserved for strict version-one config and rollback compatibility. */
   maxRecoveryWaitMs: number;
   reservationTtlMs: number;
+  preOutputTimeoutMs: number;
+  postOutputIdleTimeoutMs: number;
   scoreHysteresisRatio: number;
   headroom: {
     shortWindowMinimumPercent: number;

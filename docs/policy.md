@@ -64,6 +64,9 @@ Primer work renews both its singleton sweep lease and account lease. Foreground 
 - When no other live block governs the account, fresh usage showing an exhausted window creates a quota block until the earliest future reset. A cached snapshot is refreshed as soon as either recorded reset time elapses.
 - A transport `start` event is replay-safe.
 - Any text, thinking, or tool-call start makes replay unsafe; later errors are forwarded without account rotation.
+- A silent provider attempt is bounded independently of Pi's transport timeout. `preOutputTimeoutMs` and `postOutputIdleTimeoutMs` default to five minutes and accept 30 seconds through five minutes, matching Pi's supported HTTP-idle range. Old strict version-one configs receive both defaults when read.
+- Before model-visible output, any provider event renews the pre-output deadline; a timeout aborts/releases that attempt and may rotate without recording quota, auth, or account-health failure. Once text, thinking, or a tool-call lifecycle event crosses the replay boundary, subsequent provider activity renews the post-output idle deadline; its timeout aborts/releases and emits one sanitized terminal error without replay or rotation.
+- User cancellation remains `aborted` and wins deadline races. Deadline, completion, heartbeat loss, and cancellation cleanup is idempotent.
 - A request performs at most five account attempts.
 - An explicit provider retry time controls a quota block. Otherwise the latest observed reset across exhausted windows is used; without either, the estimate is one hour.
 - If fresh selection finds no eligible account, the foreground stream emits one sanitized terminal error immediately. A later retry performs a new selection pass and can use recovered quota or account health.
