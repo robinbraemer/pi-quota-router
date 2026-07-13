@@ -136,6 +136,7 @@ export function createRoutedStream(
                 ...options,
                 apiKey: credential.accessToken,
                 signal: deadline.signal,
+                timeoutMs: streamSilenceTimeoutMs,
               });
               const iterator = base[Symbol.asyncIterator]();
               while (true) {
