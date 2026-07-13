@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { readdir, readFile } from "node:fs/promises";
+import { appendFile, readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   type AssistantMessageEvent,
@@ -169,28 +169,78 @@ describe("quota router end-to-end guarantees", () => {
     }));
     const worker = new URL("../helpers/worker-select.ts", import.meta.url).pathname;
     const select = async (requestId: string, accountIds = "a") => {
+      const diagnosticPath = join(fixture.directory, `primer-fence-${requestId}.jsonl`);
+      const startedAt = process.hrtime.bigint();
+      const diagnostic = async (
+        stage: string,
+        detail?: Record<string, number | string | boolean | null | string[]>,
+      ) => {
+        await appendFile(
+          diagnosticPath,
+          `${JSON.stringify({
+            source: "parent",
+            stage,
+            elapsedMs: Number(process.hrtime.bigint() - startedAt) / 1_000_000,
+            processId: process.pid,
+            ...detail,
+          })}\n`,
+          "utf8",
+        );
+      };
+      await diagnostic("spawn-requested");
       const child = Bun.spawn(
         [process.execPath, worker, fixture.file, requestId, accountIds, "false"],
         {
           stdout: "pipe",
           stderr: "pipe",
+          env: { ...process.env, PI_QUOTA_ROUTER_TEST_DIAGNOSTIC_PATH: diagnosticPath },
         },
       );
+      await diagnostic("child-pid-available", { childPid: child.pid });
       const result = Promise.all([
-        child.exited,
-        new Response(child.stdout).text(),
-        new Response(child.stderr).text(),
+        child.exited.then(async (exitCode) => {
+          await diagnostic("child-exit-settled", { exitCode });
+          return exitCode;
+        }),
+        new Response(child.stdout).text().then(async (stdout) => {
+          await diagnostic("stdout-closed", { bytes: stdout.length });
+          return stdout;
+        }),
+        new Response(child.stderr).text().then(async (stderr) => {
+          await diagnostic("stderr-closed", { bytes: stderr.length });
+          return stderr;
+        }),
       ]);
+      let deadlineSnapshot: { childExitCode: number | null; parentResources: string[] } | undefined;
       try {
         const [exitCode, stdout, stderr] = await Promise.race([
           result,
-          Bun.sleep(5_000).then(() => {
+          Bun.sleep(5_000).then(async () => {
+            deadlineSnapshot = {
+              childExitCode: child.exitCode,
+              parentResources: process.getActiveResourcesInfo().sort(),
+            };
+            await diagnostic("deadline", deadlineSnapshot);
             throw new Error("foreground worker timed out");
           }),
         ]);
         expect(exitCode).toBe(0);
         expect(stderr).toBe("");
         return JSON.parse(stdout) as { accountId?: string };
+      } catch (error) {
+        if (!deadlineSnapshot) throw error;
+        if (child.exitCode === null) child.kill();
+        const [exitCode, stdout, stderr] = await result;
+        await diagnostic("timeout-cleanup-settled", {
+          exitCode,
+          stdoutBytes: stdout.length,
+          stderrBytes: stderr.length,
+        });
+        const stages = await readFile(diagnosticPath, "utf8").catch(() => "");
+        throw new Error(
+          `foreground worker timed out; diagnostics=${JSON.stringify({ deadlineSnapshot, stages })}`,
+          { cause: error },
+        );
       } finally {
         if (child.exitCode === null) child.kill();
         await child.exited;
