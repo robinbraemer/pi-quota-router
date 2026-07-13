@@ -48,6 +48,7 @@ Start with:
 | `StoreValidationError` | Persisted JSON is malformed or violates its versioned schema. | Back up the router directory, repair the file using the documented schema, or move only non-credential config/state aside for recreation. Runtime state v1 migrates to v2; credentials/config remain v1. |
 | `StoreLockTimeoutError` | A JSON state lock remained contended for five seconds. | Wait for peer work; check for a stuck Pi process. Reset reservations only after confirming no peer is active. |
 | `ReservationLostError` | An active request's persisted lease disappeared or could not be renewed. | Retry the turn after checking peer processes. Do not reset reservations while any Pi process is active. |
+| `StreamSilenceTimeoutError` | The provider produced no events within the active request's silence deadline. | Retry the turn and check provider connectivity if it repeats. Pre-output silence may rotate accounts; post-output silence is never replayed. See the exact deadline behavior in [Routing policy](policy.md#failure-and-recovery-policy). |
 | `CodexUsageParseError` | The usage endpoint returned an unsupported body, duplicate semantic window, or explicit duration other than five hours/seven days. | Update Pi Quota Router; preserve a redacted response shape and duration fields if filing an issue. Never post headers/tokens. |
 | `CodexUsageHttpError` | Usage returned HTTP failure, timed out, or did not complete. | Check connectivity/authentication, run `refresh all`, and retry. Last-good data can be used conservatively for up to 24 hours. |
 | `RouteUnavailableError` | Fresh selection found no eligible automatic account or the manual account was unavailable. The stream closes immediately with one of the actionable messages above. | Resolve quota, usage-data, health, block, or reservation state and start a new turn. |
@@ -57,7 +58,7 @@ Start with:
 
 A quota/auth failure before text, thinking, or tool-call output may rotate transparently up to five attempts. A lone transport `start` is not visible output. If no eligible account remains, the stream returns an error immediately instead of holding the turn open. Once any visible/model-action output begins, the router forwards the error and never replays; retry the turn manually after resolving the account.
 
-Ctrl-C/Escape aborts active usage and provider work. Active reservations renew until completion; if a process is killed ungracefully, renewal stops and its reservations expire within two minutes.
+Ctrl-C/Escape aborts active usage and provider work. Active reservations renew only while a request remains active and release on completion, error, cancellation, or a silence timeout. If a process is killed ungracefully, renewal stops and its reservations expire within two minutes.
 
 ## Installation problems
 

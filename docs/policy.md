@@ -1,6 +1,6 @@
 # Routing policy
 
-This document describes the behavior implemented and tested in `src/routing/selection-policy.ts`. Percentages below mean quota remaining unless explicitly called “used.”
+This document describes quota selection, reservation, and failure-recovery behavior. Percentages below mean quota remaining unless explicitly called “used.”
 
 ## Automatic eligibility
 
@@ -65,7 +65,7 @@ Primer work renews both its singleton sweep lease and account lease. Foreground 
 - A transport `start` event is replay-safe.
 - Any text, thinking, or tool-call start makes replay unsafe; later errors are forwarded without account rotation.
 - A silent provider attempt uses the request's public `SimpleStreamOptions.timeoutMs` budget for both phases. An omitted budget defaults to five minutes; finite nonnegative values retain Pi's validation contract and the silence deadline clamps to 30 seconds through five minutes. The budget is not persisted, so strict version-one configs remain rollback-readable.
-- Before model-visible output, any provider event renews the pre-output deadline; a timeout aborts/releases that attempt and may rotate without recording quota, auth, or account-health failure. Once text, thinking, or a tool-call lifecycle event crosses the replay boundary, subsequent provider activity renews the post-output idle deadline; its timeout aborts/releases and emits one sanitized terminal error without replay or rotation.
+- Before model-visible output, each nonterminal provider event renews the pre-output deadline; a timeout aborts/releases that attempt and may rotate without recording quota, auth, or account-health failure. Once text, thinking, or a tool-call lifecycle event crosses the replay boundary, each later nonterminal event renews the post-output idle deadline; its timeout aborts/releases and emits one sanitized terminal error without replay or rotation.
 - User cancellation remains `aborted` and wins deadline races. Deadline, completion, heartbeat loss, and cancellation cleanup is idempotent.
 - A request performs at most five account attempts.
 - An explicit provider retry time controls a quota block. Otherwise the latest observed reset across exhausted windows is used; without either, the estimate is one hour.
