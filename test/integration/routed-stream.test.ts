@@ -803,6 +803,19 @@ describe("RoutedStream", () => {
   });
 
   test("isolates renewal loss to the affected lease token", async () => {
+    const visiblePartial: AssistantMessage = {
+      ...message(),
+      content: [{ type: "text", text: "partial before renewal loss" }],
+      usage: {
+        input: 17,
+        output: 9,
+        cacheRead: 5,
+        cacheWrite: 3,
+        reasoning: 4,
+        totalTokens: 34,
+        cost: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, total: 10 },
+      },
+    };
     let finishPeer: (() => void) | undefined;
     const peerHeld = new Promise<void>((resolve) => {
       finishPeer = resolve;
@@ -817,6 +830,17 @@ describe("RoutedStream", () => {
         if (options?.sessionId === "peer") {
           await peerHeld;
         } else {
+          yield {
+            type: "text_start",
+            contentIndex: 0,
+            partial: message(),
+          } as AssistantMessageEvent;
+          yield {
+            type: "text_delta",
+            contentIndex: 0,
+            delta: "partial before renewal loss",
+            partial: visiblePartial,
+          } as AssistantMessageEvent;
           const signal = options?.signal;
           if (!signal) throw new Error("renewal-loss fixture requires a heartbeat signal");
           signal.throwIfAborted();
@@ -848,7 +872,15 @@ describe("RoutedStream", () => {
       const lostLast = lost.at(-1);
       expect(lostLast?.type).toBe("error");
       if (lostLast?.type !== "error") throw new Error("expected renewal loss error event");
+      expect(lost.map((event) => event.type)).toEqual([
+        "start",
+        "text_start",
+        "text_delta",
+        "error",
+      ]);
       expect(lost.filter((event) => event.type === "error")).toHaveLength(1);
+      expect(lostLast.error.content).toEqual(visiblePartial.content);
+      expect(lostLast.error.usage).toEqual(visiblePartial.usage);
       expect(lostLast.error.errorMessage).toBe(
         "The Codex account reservation could not be renewed",
       );

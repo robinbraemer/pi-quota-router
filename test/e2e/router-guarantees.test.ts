@@ -45,6 +45,7 @@ const model = Object.values(OPENAI_CODEX_MODELS)[0] as Model<"openai-codex-respo
 const context = { messages: [] } as Context;
 const cleanups: Array<() => Promise<void>> = [];
 const WORKER_READY_TIMEOUT_MS = 5_000;
+type StagedWorkerState = "released" | "exited-before-ready" | "exited-before-release";
 
 setDefaultTimeout(30_000);
 
@@ -57,7 +58,7 @@ async function selectPrimerFenceWorker(input: {
   requestId: string;
   accountIds?: string;
   environment?: Record<string, string>;
-  startBarrier?: { path: string; releaseDelayMs: number };
+  startBarrier?: { path: string; releaseDelayMs: number; readyAcknowledgement?: string };
   command?: string[];
 }): Promise<{ accountId?: string }> {
   const worker = new URL("../helpers/worker-select.ts", import.meta.url).pathname;
@@ -88,20 +89,30 @@ async function selectPrimerFenceWorker(input: {
     new Response(child.stderr).text(),
   ]);
   try {
-    let stagedWorkerState: "ready" | "exited-before-ready" | undefined;
+    let stagedWorkerState: StagedWorkerState | undefined;
     if (input.startBarrier) {
       stagedWorkerState = await releaseStagedWorker({
         barrier: input.startBarrier.path,
         requestId: input.requestId,
         releaseDelayMs: input.startBarrier.releaseDelayMs,
+        ...(input.startBarrier.readyAcknowledgement
+          ? { readyAcknowledgement: input.startBarrier.readyAcknowledgement }
+          : {}),
         workerExited: child.exited,
       });
     }
     const [exitCode, stdout, stderr] = await result;
-    if (stagedWorkerState === "exited-before-ready") {
+    if (
+      stagedWorkerState === "exited-before-ready" ||
+      stagedWorkerState === "exited-before-release"
+    ) {
+      const milestone =
+        stagedWorkerState === "exited-before-ready"
+          ? "staged worker ready"
+          : "staged worker release";
       throw new Error(
         [
-          `foreground worker exited with code ${exitCode} before staged worker ready`,
+          `foreground worker exited with code ${exitCode} before ${milestone}`,
           `stdout:\n${stdout}`,
           `stderr:\n${stderr}`,
         ].join("\n"),
@@ -133,8 +144,9 @@ async function releaseStagedWorker(input: {
   barrier: string;
   requestId: string;
   releaseDelayMs: number;
+  readyAcknowledgement?: string;
   workerExited: Promise<number>;
-}): Promise<"ready" | "exited-before-ready"> {
+}): Promise<StagedWorkerState> {
   const polling = new AbortController();
   const ready = waitForFile(`${input.barrier}.${input.requestId}.ready`, polling.signal);
   let readinessTimer: ReturnType<typeof setTimeout> | undefined;
@@ -155,12 +167,16 @@ async function releaseStagedWorker(input: {
       readinessTimer = undefined;
     }
     if (state === "exited") return "exited-before-ready";
+    if (input.readyAcknowledgement) {
+      await writeFile(input.readyAcknowledgement, "ready observed", "utf8");
+    }
     const releaseDelay = new Promise<true>((resolve) => {
       releaseTimer = setTimeout(() => resolve(true), input.releaseDelayMs);
     });
     const release = await Promise.race([releaseDelay, input.workerExited.then(() => false)]);
-    if (release) await writeFile(input.barrier, "release", "utf8");
-    return "ready";
+    if (!release) return "exited-before-release";
+    await writeFile(input.barrier, "release", "utf8");
+    return "released";
   } finally {
     if (readinessTimer !== undefined) clearTimeout(readinessTimer);
     if (releaseTimer !== undefined) clearTimeout(releaseTimer);
@@ -347,6 +363,7 @@ describe("quota router end-to-end guarantees", () => {
       ],
     }));
     const barrier = join(fixture.directory, "staged-worker-release");
+    const startedAt = Date.now();
     expect(
       (
         await selectPrimerFenceWorker({
@@ -357,6 +374,7 @@ describe("quota router end-to-end guarantees", () => {
         })
       ).accountId,
     ).toBe("b");
+    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(5_000);
     expect(
       await access(`${barrier}.staged-worker.ready`)
         .then(() => true)
@@ -414,6 +432,38 @@ describe("quota router end-to-end guarantees", () => {
     expect(failure).toBeInstanceOf(Error);
     if (!(failure instanceof Error)) throw new Error("expected staged worker protocol failure");
     expect(failure.message).toContain("before staged worker ready");
+    expect(failure.message).toContain(workerOutput.trim());
+    expect(failure.message).not.toContain("staged worker readiness timed out");
+  });
+
+  test("rejects a clean worker exit after ready but before parent release", async () => {
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    const requestId = "clean-post-ready-exit";
+    const barrier = join(fixture.directory, "clean-post-ready-release");
+    const ready = `${barrier}.${requestId}.ready`;
+    const readyAcknowledgement = `${barrier}.${requestId}.observed`;
+    const workerOutput = `${JSON.stringify({ accountId: "a" })}\n`;
+
+    let failure: unknown;
+    try {
+      await selectPrimerFenceWorker({
+        fixture,
+        requestId,
+        command: [
+          process.execPath,
+          "-e",
+          `await Bun.write(${JSON.stringify(ready)}, "ready"); while (!(await Bun.file(${JSON.stringify(readyAcknowledgement)}).exists())) await Bun.sleep(1); process.stdout.write(${JSON.stringify(workerOutput)})`,
+        ],
+        startBarrier: { path: barrier, releaseDelayMs: 5_100, readyAcknowledgement },
+      });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toBeInstanceOf(Error);
+    if (!(failure instanceof Error)) throw new Error("expected staged worker protocol failure");
+    expect(failure.message).toContain("before staged worker release");
     expect(failure.message).toContain(workerOutput.trim());
     expect(failure.message).not.toContain("staged worker readiness timed out");
   });

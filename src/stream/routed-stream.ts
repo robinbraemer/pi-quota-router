@@ -273,14 +273,12 @@ export function createRoutedStream(
                 output.push(pendingStart);
               }
               const reason = options?.signal?.aborted ? "aborted" : "error";
-              output.push(
-                errorEvent(
-                  model,
-                  reason,
-                  error,
-                  reason === "aborted" && !boundary.isReplaySafe() ? latestPartial : undefined,
-                ),
-              );
+              const safePartial =
+                !boundary.isReplaySafe() &&
+                (reason === "aborted" || error instanceof ReservationLostError)
+                  ? latestPartial
+                  : undefined;
+              output.push(errorEvent(model, reason, error, safePartial));
               return;
             }
           }
