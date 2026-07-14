@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type {
+  AssistantMessage,
   AssistantMessageEvent,
   Context,
   Model,
@@ -11,12 +12,59 @@ import {
   type RoutedStreamDependencies,
 } from "../../src/stream/routed-stream.ts";
 import {
+  resolveStreamSilenceTimeoutMs,
+  StreamSilenceTimeoutError,
+} from "../../src/stream/stream-silence.ts";
+import {
   eventStream,
   message,
   quotaError,
   start,
   successfulText,
 } from "../fixtures/provider-streams.ts";
+
+interface TimeoutHandle {
+  clear(): void;
+}
+
+interface ControlledTimers {
+  setTimeout(callback: () => void, delayMs: number): TimeoutHandle;
+}
+
+class FakeTimers implements ControlledTimers {
+  #now = 0;
+  #nextId = 0;
+  #scheduled = new Map<number, { at: number; callback: () => void }>();
+
+  setTimeout(callback: () => void, delayMs: number): TimeoutHandle {
+    const id = this.#nextId++;
+    this.#scheduled.set(id, { at: this.#now + delayMs, callback });
+    return { clear: () => this.#scheduled.delete(id) };
+  }
+
+  advanceBy(delayMs: number): void {
+    const target = this.#now + delayMs;
+    while (true) {
+      const due = [...this.#scheduled.entries()]
+        .filter(([, timer]) => timer.at <= target)
+        .sort(([, left], [, right]) => left.at - right.at)[0];
+      if (!due) break;
+      const [id, timer] = due;
+      this.#scheduled.delete(id);
+      this.#now = timer.at;
+      timer.callback();
+    }
+    this.#now = target;
+  }
+
+  get pending(): number {
+    return this.#scheduled.size;
+  }
+}
+
+async function flushAsyncWork(): Promise<void> {
+  for (let turn = 0; turn < 40; turn += 1) await Promise.resolve();
+}
 
 const model = {
   id: "gpt-test",
@@ -37,7 +85,7 @@ function dependencies(accounts: string[], baseStream: RoutedStreamDependencies["
   const selected: string[] = [];
   const released: string[] = [];
   const recorded: string[] = [];
-  const succeeded: string[] = [];
+  const succeeded: Array<[string, string | undefined]> = [];
   const renewed: string[] = [];
   const value: RoutedStreamDependencies = {
     selectAndReserve: async ({ excludedAccountIds }) => {
@@ -46,8 +94,6 @@ function dependencies(accounts: string[], baseStream: RoutedStreamDependencies["
         return {
           kind: "unavailable",
           reason: "no_eligible_accounts",
-          recoverableAccountIds: [],
-          knownAccountIds: accounts,
         };
       }
       selected.push(accountId);
@@ -71,8 +117,8 @@ function dependencies(accounts: string[], baseStream: RoutedStreamDependencies["
     recordFailure: async (accountId) => {
       recorded.push(accountId);
     },
-    recordSuccess: (accountId) => {
-      succeeded.push(accountId);
+    recordSuccess: (accountId, sessionId?: string) => {
+      succeeded.push([accountId, sessionId]);
     },
     release: async (leaseToken) => {
       released.push(leaseToken);
@@ -81,7 +127,6 @@ function dependencies(accounts: string[], baseStream: RoutedStreamDependencies["
       renewed.push(leaseToken);
       return true;
     },
-    waitForRecovery: async () => undefined,
     maxAttempts: () => 5,
   };
   return { value, selected, released, recorded, renewed, succeeded };
@@ -99,7 +144,7 @@ describe("RoutedStream", () => {
     const routed = createRoutedStream(setup.value);
 
     const events = await collect(
-      routed(model, context, { reasoning: "high", sessionId: "session-1" }),
+      routed(model, context, { reasoning: "high", sessionId: "  session-1  " }),
     );
 
     expect(events.map((event) => event.type)).toEqual([
@@ -112,12 +157,12 @@ describe("RoutedStream", () => {
     expect(setup.selected).toEqual(["a", "b"]);
     expect(setup.released.sort()).toEqual(["lease-a", "lease-b"]);
     expect(setup.recorded).toEqual(["a"]);
-    expect(setup.succeeded).toEqual(["b"]);
+    expect(setup.succeeded).toEqual([["b", "  session-1  "]]);
     expect(optionsSeen[1]).toEqual(
       expect.objectContaining({
         apiKey: "token-b",
         reasoning: "high",
-        sessionId: "session-1",
+        sessionId: "  session-1  ",
       }),
     );
   });
@@ -138,6 +183,54 @@ describe("RoutedStream", () => {
     expect(setup.succeeded).toEqual([]);
   });
 
+  test("preserves safe terminal content and usage while sanitizing provider diagnostics", async () => {
+    const secret = "secret-provider-diagnostic";
+    const terminal: AssistantMessage & { rawIdentity: string } = {
+      ...message("error", `usage limit reached ${secret}`),
+      content: [{ type: "text", text: "partial answer" }],
+      responseId: secret,
+      diagnostics: [
+        {
+          type: "provider-error",
+          timestamp: 2,
+          details: { body: secret, authorization: `Bearer ${secret}` },
+        },
+      ],
+      usage: {
+        input: 11,
+        output: 7,
+        cacheRead: 5,
+        cacheWrite: 3,
+        cacheWrite1h: 2,
+        reasoning: 4,
+        totalTokens: 26,
+        cost: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, total: 10 },
+      },
+      rawIdentity: secret,
+    };
+    const setup = dependencies(["a", "b"], () =>
+      eventStream([
+        start(),
+        { type: "text_start", contentIndex: 0, partial: message() },
+        { type: "error", reason: "error", error: terminal },
+      ]),
+    );
+
+    const events = await collect(createRoutedStream(setup.value)(model, context));
+    const error = events.at(-1);
+
+    expect(error?.type).toBe("error");
+    if (error?.type !== "error") throw new Error("expected a terminal error event");
+    expect(error.error.content).toEqual(terminal.content);
+    expect(error.error.usage).toEqual(terminal.usage);
+    expect(error.error.errorMessage).toBe("No Codex account completed the request");
+    expect(error.error.stopReason).toBe("error");
+    expect(error.error.responseId).toBeUndefined();
+    expect(error.error.diagnostics).toBeUndefined();
+    expect(JSON.stringify(error)).not.toContain(secret);
+    expect(setup.selected).toEqual(["a"]);
+  });
+
   test("never rotates when an iterator throws after visible output", async () => {
     const setup = dependencies(["a", "b"], (() => {
       const stream = (async function* () {
@@ -153,6 +246,42 @@ describe("RoutedStream", () => {
     expect(events.map((event) => event.type)).toEqual(["start", "text_start", "error"]);
     expect(setup.selected).toEqual(["a"]);
     expect(setup.recorded).toEqual(["a"]);
+    expect(setup.succeeded).toEqual([]);
+  });
+
+  test("does not record success for an aborted request", async () => {
+    const setup = dependencies(["a"], () => eventStream(successfulText()));
+    const controller = new AbortController();
+    controller.abort(new Error("synthetic cancellation"));
+
+    const events = await collect(
+      createRoutedStream(setup.value)(model, context, {
+        signal: controller.signal,
+        sessionId: "cancelled-session",
+        timeoutMs: Number.NaN,
+      }),
+    );
+
+    const terminal = events.at(-1);
+    expect(terminal?.type).toBe("error");
+    if (terminal?.type !== "error") throw new Error("expected cancellation error event");
+    expect(terminal.reason).toBe("aborted");
+    expect(setup.selected).toEqual([]);
+    expect(setup.succeeded).toEqual([]);
+  });
+
+  test("does not record success when the provider iterator ends without done", async () => {
+    const setup = dependencies(["a"], (() =>
+      (async function* () {
+        yield start();
+      })()) as unknown as RoutedStreamDependencies["baseStream"]);
+
+    const events = await collect(
+      createRoutedStream(setup.value)(model, context, { sessionId: "unterminated-session" }),
+    );
+
+    expect(events.map((event) => event.type)).toEqual(["error"]);
+    expect(setup.succeeded).toEqual([]);
   });
 
   test("force refreshes the first generic 401 and retries the same account", async () => {
@@ -179,27 +308,152 @@ describe("RoutedStream", () => {
     expect(setup.recorded).toEqual([]);
   });
 
-  test("records a recoverable failure on the final attempt", async () => {
-    const setup = dependencies(["a"], () => eventStream([start(), quotaError()]));
-    setup.value.maxAttempts = () => 1;
+  test("retries concurrent generic 401 requests under their unchanged distinct leases", async () => {
+    const keys = new Map<string, string[]>();
+    const setup = dependencies(["a"], (_model, _context, options) => {
+      const sessionId = options?.sessionId ?? "";
+      keys.set(sessionId, [...(keys.get(sessionId) ?? []), options?.apiKey ?? ""]);
+      return options?.apiKey === "token-a"
+        ? eventStream([
+            start(),
+            { type: "error", reason: "error", error: message("error", "unauthorized") },
+          ])
+        : eventStream(successfulText());
+    });
+    const selections = new Map<string, number>();
+    setup.value.selectAndReserve = async ({ options }) => {
+      const sessionId = options?.sessionId ?? "";
+      selections.set(sessionId, (selections.get(sessionId) ?? 0) + 1);
+      return {
+        kind: "selected",
+        lease: {
+          accountId: "a",
+          leaseToken: `lease-${sessionId}`,
+          reservationTtlMs: 120_000,
+        },
+      };
+    };
+    setup.value.classifyFailure = (error) =>
+      error instanceof Object && "errorMessage" in error
+        ? { kind: "auth-retry" }
+        : classifyFailure(error, 2_000_000_000_000);
+    const routed = createRoutedStream(setup.value);
 
-    await collect(createRoutedStream(setup.value)(model, context));
+    const results = await Promise.all([
+      collect(routed(model, context, { sessionId: "one" })),
+      collect(routed(model, context, { sessionId: "two" })),
+    ]);
 
-    expect(setup.recorded).toEqual(["a"]);
+    expect(results.every((events) => events.at(-1)?.type === "done")).toBeTrue();
+    expect(Object.fromEntries(selections)).toEqual({ one: 1, two: 1 });
+    expect(keys.get("one")).toEqual(["token-a", "refreshed-a"]);
+    expect(keys.get("two")).toEqual(["token-a", "refreshed-a"]);
+    expect(setup.released.sort()).toEqual(["lease-one", "lease-two"]);
+    expect(setup.recorded).toEqual([]);
   });
 
-  test("surfaces a non-recoverable selection decision without retrying", async () => {
-    const setup = dependencies([], () => eventStream(successfulText()));
-    let waits = 0;
-    setup.value.waitForRecovery = async () => {
-      waits += 1;
+  test("reports actionable exhaustion when the final provider event fails before output", async () => {
+    const secret = "secret-final-event";
+    const setup = dependencies(["a"], () =>
+      eventStream([
+        start(),
+        {
+          type: "error",
+          reason: "error",
+          error: message("error", `usage limit reached ${secret}`),
+        },
+      ]),
+    );
+    setup.value.maxAttempts = () => 1;
+
+    const events = await collect(createRoutedStream(setup.value)(model, context));
+    const terminal = events.at(-1);
+
+    expect(setup.recorded).toEqual(["a"]);
+    expect(terminal?.type).toBe("error");
+    if (terminal?.type === "error") {
+      expect(terminal.error.errorMessage).toBe(
+        "No Codex account is currently eligible; quota, usage data, or account health must recover before retrying",
+      );
+    }
+    expect(JSON.stringify(events)).not.toContain(secret);
+  });
+
+  test("reports actionable exhaustion when the final provider iterator throws before output", async () => {
+    const secret = "secret-final-iterator";
+    const setup = dependencies(["a"], (() => {
+      throw new Error(`fetch failed ${secret}`);
+    }) as RoutedStreamDependencies["baseStream"]);
+    setup.value.maxAttempts = () => 1;
+
+    const events = await collect(createRoutedStream(setup.value)(model, context));
+    const terminal = events.at(-1);
+
+    expect(setup.recorded).toEqual(["a"]);
+    expect(terminal?.type).toBe("error");
+    if (terminal?.type === "error") {
+      expect(terminal.error.errorMessage).toBe(
+        "No Codex account is currently eligible; quota, usage data, or account health must recover before retrying",
+      );
+    }
+    expect(JSON.stringify(events)).not.toContain(secret);
+  });
+
+  test("reports actionable exhaustion when final credential loading fails before output", async () => {
+    const secret = "secret-final-credential";
+    const setup = dependencies(["a"], () => eventStream(successfulText()));
+    setup.value.getFreshCredential = async () => {
+      throw new Error(`fetch failed ${secret}`);
     };
+    setup.value.maxAttempts = () => 1;
+
+    const events = await collect(createRoutedStream(setup.value)(model, context));
+    const terminal = events.at(-1);
+
+    expect(setup.recorded).toEqual(["a"]);
+    expect(terminal?.type).toBe("error");
+    if (terminal?.type === "error") {
+      expect(terminal.error.errorMessage).toBe(
+        "No Codex account is currently eligible; quota, usage data, or account health must recover before retrying",
+      );
+    }
+    expect(JSON.stringify(events)).not.toContain(secret);
+  });
+
+  test("fails immediately when every account is temporarily unavailable", async () => {
+    const setup = dependencies(["a"], () => eventStream(successfulText()));
+    setup.value.selectAndReserve = async () => ({
+      kind: "unavailable",
+      reason: "no_eligible_accounts",
+    });
 
     const events = await collect(createRoutedStream(setup.value)(model, context));
 
     expect(events).toHaveLength(1);
     expect(events[0]?.type).toBe("error");
-    expect(waits).toBe(0);
+    if (events[0]?.type === "error") {
+      expect(events[0].error.errorMessage).toBe(
+        "No Codex account is currently eligible; quota, usage data, or account health must recover before retrying",
+      );
+    }
+  });
+
+  test("reports an unavailable manual account distinctly", async () => {
+    const setup = dependencies([], () => eventStream(successfulText()));
+    setup.value.selectAndReserve = async () => ({
+      kind: "unavailable",
+      reason: "manual_account_unavailable",
+    });
+
+    const events = await collect(createRoutedStream(setup.value)(model, context));
+    const terminal = events[0];
+
+    expect(terminal?.type).toBe("error");
+    if (terminal?.type === "error") {
+      expect(terminal.error.errorMessage).toBe(
+        "The selected Codex account is currently unavailable",
+      );
+    }
   });
 
   test("renews a lease while a request remains active", async () => {
@@ -224,13 +478,346 @@ describe("RoutedStream", () => {
     expect(setup.renewed.length).toBeGreaterThan(0);
   });
 
+  test("uses the clamped provider timeout for silent pre-output rotation", async () => {
+    const timers = new FakeTimers();
+    const controller = new AbortController();
+    const providerTimeouts: Array<number | undefined> = [];
+    let firstAbortReason: unknown;
+    let entered: (() => void) | undefined;
+    let renewed: (() => void) | undefined;
+    const enteredAttempt = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const firstRenewal = new Promise<void>((resolve) => {
+      renewed = resolve;
+    });
+    const setup = dependencies(["a", "b"], (_model, _context, options) => {
+      providerTimeouts.push(options?.timeoutMs);
+      if (options?.apiKey === "token-b") return eventStream(successfulText());
+      return (async function* () {
+        entered?.();
+        const signal = options?.signal;
+        if (!signal) throw new Error("missing routed abort signal");
+        await new Promise<void>((_resolve, reject) => {
+          signal.addEventListener(
+            "abort",
+            () => {
+              firstAbortReason = signal.reason;
+              reject(signal.reason);
+            },
+            { once: true },
+          );
+        });
+      })() as unknown as ReturnType<RoutedStreamDependencies["baseStream"]>;
+    });
+    setup.value.selectAndReserve = async ({ excludedAccountIds }) => {
+      const accountId = ["a", "b"].find((account) => !excludedAccountIds.has(account));
+      if (!accountId) return { kind: "unavailable", reason: "no_eligible_accounts" };
+      setup.selected.push(accountId);
+      return {
+        kind: "selected",
+        lease: { accountId, leaseToken: `lease-${accountId}`, reservationTtlMs: 3 },
+      };
+    };
+    setup.value.renew = async (leaseToken) => {
+      if (leaseToken === "lease-a") renewed?.();
+      setup.renewed.push(leaseToken);
+      return true;
+    };
+    setup.value.timers = timers;
+    const routed = createRoutedStream(setup.value);
+    const stream = routed(model, context, { signal: controller.signal, timeoutMs: 1 });
+    let settled = false;
+    const result = stream.result().finally(() => {
+      settled = true;
+    });
+
+    try {
+      await enteredAttempt;
+      await firstRenewal;
+      expect(settled).toBeFalse();
+      timers.advanceBy(29_999);
+      await flushAsyncWork();
+      expect(settled).toBeFalse();
+      timers.advanceBy(1);
+      await flushAsyncWork();
+
+      expect(settled).toBeTrue();
+      expect(providerTimeouts).toEqual([30_000, 30_000]);
+      expect(firstAbortReason).toBeInstanceOf(StreamSilenceTimeoutError);
+      expect((firstAbortReason as StreamSilenceTimeoutError).phase).toBe("pre-output");
+      expect(setup.selected).toEqual(["a", "b"]);
+      expect(setup.recorded).toEqual([]);
+      expect(setup.released.sort()).toEqual(["lease-a", "lease-b"]);
+    } finally {
+      controller.abort(new Error("test cleanup"));
+      await result;
+    }
+  });
+
+  test("terminates a silent post-output attempt without replay or failure persistence", async () => {
+    const timers = new FakeTimers();
+    const controller = new AbortController();
+    let entered: (() => void) | undefined;
+    let renewed: (() => void) | undefined;
+    const enteredAttempt = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const firstRenewal = new Promise<void>((resolve) => {
+      renewed = resolve;
+    });
+    const setup = dependencies(
+      ["a", "b"],
+      (_model, _context, options) =>
+        (async function* () {
+          yield start();
+          yield {
+            type: "text_start",
+            contentIndex: 0,
+            partial: message(),
+          } as AssistantMessageEvent;
+          entered?.();
+          const signal = options?.signal;
+          if (!signal) throw new Error("missing routed abort signal");
+          await new Promise<void>((_resolve, reject) => {
+            signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+          });
+        })() as unknown as ReturnType<RoutedStreamDependencies["baseStream"]>,
+    );
+    setup.value.selectAndReserve = async () => {
+      setup.selected.push("a");
+      return {
+        kind: "selected",
+        lease: { accountId: "a", leaseToken: "lease-a", reservationTtlMs: 3 },
+      };
+    };
+    setup.value.renew = async (leaseToken) => {
+      renewed?.();
+      setup.renewed.push(leaseToken);
+      return true;
+    };
+    setup.value.timers = timers;
+    const routed = createRoutedStream(setup.value);
+    const stream = routed(model, context, { signal: controller.signal });
+    let settled = false;
+    const result = stream.result().finally(() => {
+      settled = true;
+    });
+
+    try {
+      await enteredAttempt;
+      await firstRenewal;
+      expect(settled).toBeFalse();
+      timers.advanceBy(299_999);
+      await flushAsyncWork();
+      expect(settled).toBeFalse();
+      timers.advanceBy(1);
+      await flushAsyncWork();
+
+      expect(settled).toBeTrue();
+      const terminal = await result;
+      expect(terminal.stopReason).toBe("error");
+      expect(terminal.errorMessage).toBe("The Codex response stream became idle after output");
+      expect(setup.selected).toEqual(["a"]);
+      expect(setup.recorded).toEqual([]);
+      expect(setup.released).toEqual(["lease-a"]);
+    } finally {
+      controller.abort(new Error("test cleanup"));
+      await result;
+    }
+  });
+
+  test("external cancellation wins before, at, and immediately after a silence deadline", async () => {
+    for (const timing of ["before", "at", "after"] as const) {
+      const timers = new FakeTimers();
+      const controller = new AbortController();
+      let entered: (() => void) | undefined;
+      const enteredAttempt = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      if (timing === "at") {
+        timers.setTimeout(() => controller.abort(new Error("user cancelled")), 30_000);
+      }
+      const setup = dependencies(
+        ["a"],
+        (_model, _context, options) =>
+          (async function* () {
+            yield start();
+            yield {
+              type: "text_start",
+              contentIndex: 0,
+              partial: message(),
+            } as AssistantMessageEvent;
+            entered?.();
+            const signal = options?.signal;
+            if (!signal) throw new Error("missing routed abort signal");
+            await new Promise<void>((_resolve, reject) => {
+              signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+            });
+          })() as unknown as ReturnType<RoutedStreamDependencies["baseStream"]>,
+      );
+      setup.value.timers = timers;
+      const routed = createRoutedStream(setup.value);
+      const stream = routed(model, context, { signal: controller.signal, timeoutMs: 1 });
+
+      await enteredAttempt;
+      if (timing === "before") controller.abort(new Error("user cancelled"));
+      if (timing === "at") timers.advanceBy(30_000);
+      if (timing === "after") {
+        timers.advanceBy(30_000);
+        controller.abort(new Error("user cancelled"));
+      }
+      await flushAsyncWork();
+      const terminal = await stream.result();
+
+      expect(terminal.stopReason).toBe("aborted");
+      expect(terminal.errorMessage).toBe("The Codex request was cancelled");
+      expect(setup.recorded).toEqual([]);
+      expect(setup.released).toEqual(["lease-a"]);
+      expect(timers.pending).toBe(0);
+    }
+  });
+
+  test("a terminal event immediately before the idle deadline settles once and clears the timer", async () => {
+    const timers = new FakeTimers();
+    let finish: (() => void) | undefined;
+    const ready = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const setup = dependencies(
+      ["a"],
+      () =>
+        (async function* () {
+          yield start();
+          yield {
+            type: "text_start",
+            contentIndex: 0,
+            partial: message(),
+          } as AssistantMessageEvent;
+          await ready;
+          yield { type: "done", reason: "stop", message: message() } as AssistantMessageEvent;
+        })() as unknown as ReturnType<RoutedStreamDependencies["baseStream"]>,
+    );
+    setup.value.timers = timers;
+    const routed = createRoutedStream(setup.value);
+    const stream = routed(model, context, { timeoutMs: 300_001 });
+
+    await flushAsyncWork();
+    timers.advanceBy(299_999);
+    finish?.();
+    await flushAsyncWork();
+    timers.advanceBy(1);
+    await flushAsyncWork();
+
+    const terminal = await stream.result();
+    expect(terminal.stopReason).toBe("stop");
+    expect(setup.released).toEqual(["lease-a"]);
+    expect(timers.pending).toBe(0);
+  });
+
+  test("rejects invalid request timeouts before selecting an account", async () => {
+    let baseStreamCalls = 0;
+    const setup = dependencies(["a"], () => {
+      baseStreamCalls += 1;
+      return eventStream(successfulText());
+    });
+
+    const terminal = await createRoutedStream(setup.value)(model, context, {
+      timeoutMs: Number.NaN,
+    }).result();
+
+    expect(terminal.stopReason).toBe("error");
+    expect(setup.selected).toEqual([]);
+    expect(baseStreamCalls).toBe(0);
+  });
+
+  test("clamps request silence budgets to the supported range", () => {
+    expect(resolveStreamSilenceTimeoutMs(undefined)).toBe(300_000);
+    expect(resolveStreamSilenceTimeoutMs(0)).toBe(30_000);
+    expect(resolveStreamSilenceTimeoutMs(45_000.9)).toBe(45_000);
+    expect(resolveStreamSilenceTimeoutMs(300_001)).toBe(300_000);
+    expect(() => resolveStreamSilenceTimeoutMs(-1)).toThrow("Invalid timeoutMs: -1");
+  });
+
+  test("isolates renewal loss to the affected lease token", async () => {
+    let finishPeer: (() => void) | undefined;
+    const peerHeld = new Promise<void>((resolve) => {
+      finishPeer = resolve;
+    });
+    const baseStream = ((
+      _model: Model<"openai-codex-responses">,
+      _context: Context,
+      options?: SimpleStreamOptions,
+    ) =>
+      (async function* () {
+        yield start();
+        if (options?.sessionId === "peer") {
+          await peerHeld;
+        } else {
+          const signal = options?.signal;
+          if (!signal) throw new Error("renewal-loss fixture requires a heartbeat signal");
+          signal.throwIfAborted();
+          await new Promise<void>((_resolve, reject) => {
+            signal.addEventListener("abort", () => reject(signal.reason), {
+              once: true,
+            });
+          });
+        }
+        for (const event of successfulText().slice(1)) yield event;
+      })()) as unknown as RoutedStreamDependencies["baseStream"];
+    const setup = dependencies(["a"], baseStream);
+    setup.value.selectAndReserve = async ({ options }) => ({
+      kind: "selected",
+      lease: {
+        accountId: "a",
+        leaseToken: options?.sessionId === "lost" ? "lost-token" : "peer-token",
+        reservationTtlMs: 15,
+      },
+    });
+    setup.value.renew = async (leaseToken) => leaseToken !== "lost-token";
+    const routed = createRoutedStream(setup.value);
+
+    const lostPromise = collect(routed(model, context, { sessionId: "lost" }));
+    const peerPromise = collect(routed(model, context, { sessionId: "peer" }));
+    try {
+      const lost = await lostPromise;
+
+      const lostLast = lost.at(-1);
+      expect(lostLast?.type).toBe("error");
+      if (lostLast?.type !== "error") throw new Error("expected renewal loss error event");
+      expect(lost.filter((event) => event.type === "error")).toHaveLength(1);
+      expect(lostLast.error.errorMessage).toBe(
+        "The Codex account reservation could not be renewed",
+      );
+      expect(setup.released).toEqual(["lost-token"]);
+      expect(setup.recorded).toEqual([]);
+      expect(setup.succeeded).toEqual([]);
+
+      finishPeer?.();
+      const peer = await peerPromise;
+      expect(peer.at(-1)?.type).toBe("done");
+      expect(setup.released.sort()).toEqual(["lost-token", "peer-token"]);
+      expect(setup.succeeded).toEqual([["a", "peer"]]);
+    } finally {
+      finishPeer?.();
+      await Promise.allSettled([lostPromise, peerPromise]);
+    }
+  });
+
   test("enforces the maximum rotation attempt count", async () => {
     const setup = dependencies(["a", "b", "c", "d", "e", "f"], () =>
       eventStream([start(), quotaError()]),
     );
     const events = await collect(createRoutedStream(setup.value)(model, context));
+    const terminal = events.at(-1);
 
     expect(setup.selected).toHaveLength(5);
-    expect(events.map((event) => event.type)).toEqual(["start", "error"]);
+    expect(events.map((event) => event.type)).toEqual(["error"]);
+    expect(terminal?.type).toBe("error");
+    if (terminal?.type === "error") {
+      expect(terminal.error.errorMessage).toBe(
+        "No Codex account is currently eligible; quota, usage data, or account health must recover before retrying",
+      );
+    }
   });
 });

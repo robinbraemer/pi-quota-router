@@ -4,6 +4,7 @@ export interface RouterConfig {
   manualAccountId?: string | undefined;
   usageFreshnessMs: number;
   maxRotationAttempts: number;
+  /** Reserved for strict version-one config and rollback compatibility. */
   maxRecoveryWaitMs: number;
   reservationTtlMs: number;
   scoreHysteresisRatio: number;
@@ -33,17 +34,17 @@ export interface ManagedCodexAccount {
 
 export interface UsageWindow {
   usedPercent: number;
-  resetsAt?: number;
+  resetsAt?: number | undefined;
 }
 
 export interface UsageSnapshot {
   accountId: string;
   observedAt: number;
-  shortWindow: UsageWindow;
-  weeklyWindow?: UsageWindow;
+  shortWindow?: UsageWindow | undefined;
+  weeklyWindow?: UsageWindow | undefined;
   stale: boolean;
-  planType?: string;
-  creditsRemaining?: number;
+  planType?: string | undefined;
+  creditsRemaining?: number | undefined;
 }
 
 export interface AccountBlock {
@@ -75,7 +76,7 @@ export interface Candidate {
   usage?: UsageSnapshot;
   needsReauth: boolean;
   block?: AccountBlock;
-  reservation?: Reservation;
+  primerLease?: Reservation;
   untouched: boolean;
 }
 

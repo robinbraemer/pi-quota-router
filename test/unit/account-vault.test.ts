@@ -86,19 +86,16 @@ describe("AccountVault", () => {
     expect(first.accessToken).toBe(second.accessToken);
   });
 
-  test("keeps a shared refresh alive when its first caller aborts", async () => {
-    const firstCaller = new AbortController();
-    let resolveRefresh: ((credentials: ReturnType<typeof makeCredentials>) => void) | undefined;
-    let markRefreshStarted: (() => void) | undefined;
-    const refreshStarted = new Promise<void>((resolve) => {
-      markRefreshStarted = resolve;
-    });
+  test("lets each caller abort independently while a shared refresh continues", async () => {
+    let releaseRefresh: (() => void) | undefined;
+    let refreshes = 0;
     const { createVault } = await setup({
       refresh: async () => {
-        markRefreshStarted?.();
-        return await new Promise((resolve) => {
-          resolveRefresh = resolve;
+        refreshes += 1;
+        await new Promise<void>((resolve) => {
+          releaseRefresh = resolve;
         });
+        return makeCredentials("account-1", NOW + 3_600_000, "refreshed");
       },
     });
     const vault = createVault();
@@ -106,25 +103,53 @@ describe("AccountVault", () => {
       "work",
       makeCredentials("account-1", NOW + 60_000, "expiring"),
     );
+    const cancellation = new AbortController();
 
-    const first = vault.getFreshCredential(id, firstCaller.signal);
-    const second = vault.getFreshCredential(id);
-    await refreshStarted;
-    const cancellation = new Error("first caller cancelled");
-    firstCaller.abort(cancellation);
+    const cancelled = vault.getFreshCredential(id, cancellation.signal);
+    const waiting = vault.getFreshCredential(id);
+    while (!releaseRefresh) {
+      await Bun.sleep(1);
+    }
+    cancellation.abort(new Error("cancelled caller"));
 
-    await expect(
-      Promise.race([
-        first,
-        Bun.sleep(100).then(() => {
-          throw new Error("first caller did not cancel independently");
-        }),
-      ]),
-    ).rejects.toBe(cancellation);
-    resolveRefresh?.(makeCredentials("account-1", NOW + 3_600_000, "refreshed"));
-    expect((await second).accessToken).toBe(
+    const cancelledOutcome = await Promise.race([
+      cancelled.then(
+        () => "resolved",
+        (error) => (error instanceof Error ? error.message : String(error)),
+      ),
+      Bun.sleep(20).then(() => "still waiting"),
+    ]);
+    releaseRefresh?.();
+    const waitingOutcome = await waiting.catch((error) => error);
+
+    expect(cancelledOutcome).toBe("cancelled caller");
+    expect(refreshes).toBe(1);
+    expect(waitingOutcome).not.toBeInstanceOf(Error);
+    expect(waitingOutcome.accessToken).toBe(
       makeCredentials("account-1", NOW + 3_600_000, "refreshed").access,
     );
+  });
+
+  test("does not start a refresh for an already-aborted caller", async () => {
+    let refreshes = 0;
+    const { createVault } = await setup({
+      refresh: async () => {
+        refreshes += 1;
+        return makeCredentials("account-1", NOW + 3_600_000, "refreshed");
+      },
+    });
+    const vault = createVault();
+    const id = await vault.addFromOAuth(
+      "work",
+      makeCredentials("account-1", NOW + 60_000, "expiring"),
+    );
+    const cancellation = new AbortController();
+    cancellation.abort(new Error("already cancelled"));
+
+    await expect(vault.getFreshCredential(id, cancellation.signal)).rejects.toThrow(
+      "already cancelled",
+    );
+    expect(refreshes).toBe(0);
   });
 
   test("reuses a peer vault's refresh after acquiring the cross-process lock", async () => {

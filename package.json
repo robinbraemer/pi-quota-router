@@ -2,6 +2,16 @@
   "name": "@robinbraemer/pi-quota-router",
   "version": "0.1.0",
   "description": "Quota-aware multi-account routing for normal Pi",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/robinbraemer/pi-quota-router.git"
+  },
+  "homepage": "https://github.com/robinbraemer/pi-quota-router#readme",
+  "bugs": "https://github.com/robinbraemer/pi-quota-router/issues",
+  "publishConfig": {
+    "access": "public"
+  },
   "keywords": [
     "pi-package"
   ],
@@ -22,14 +32,15 @@
     "typecheck": "tsgo --noEmit",
     "check": "bun run lint && bun run typecheck && bun test",
     "audit": "bun audit --prod --audit-level=high",
+    "check:public-hygiene": "bun run scripts/check-public-hygiene.ts",
     "check:secrets": "bun run scripts/check-secrets.ts",
     "smoke:install": "bun run scripts/smoke-install.ts",
     "pack:check": "bun pm pack --dry-run --ignore-scripts"
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-coding-agent": "*",
-    "@earendil-works/pi-tui": "*"
+    "@earendil-works/pi-ai": ">=0.80.6",
+    "@earendil-works/pi-coding-agent": ">=0.80.6",
+    "@earendil-works/pi-tui": ">=0.80.6"
   },
   "dependencies": {
     "proper-lockfile": "4.1.2",

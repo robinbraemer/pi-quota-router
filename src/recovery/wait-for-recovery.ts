@@ -31,11 +31,12 @@ export interface WaitForRecoveryOptions {
   signal?: AbortSignal;
   recheckMs?: number;
   maxWaitMs?: number;
+  deadline?: number;
 }
 
 export async function waitForRecovery(options: WaitForRecoveryOptions): Promise<void> {
   const startedAt = options.clock();
-  const deadline = startedAt + (options.maxWaitMs ?? DEFAULT_MAX_WAIT_MS);
+  const deadline = options.deadline ?? startedAt + (options.maxWaitMs ?? DEFAULT_MAX_WAIT_MS);
   const recheckMs = options.recheckMs ?? DEFAULT_RECHECK_MS;
   const sleep =
     options.sleep ??
@@ -56,15 +57,27 @@ export async function waitForRecovery(options: WaitForRecoveryOptions): Promise<
     }
     const state = await options.stateStore.read();
     const accountIds = options.accountIds ? new Set(options.accountIds) : undefined;
-    const blocks = accountIds
-      ? state.blocks.filter((block) => accountIds.has(block.accountId))
-      : state.blocks;
+    const blocks = (
+      accountIds ? state.blocks.filter((block) => accountIds.has(block.accountId)) : state.blocks
+    ).filter((block) => block.retryAt === undefined || block.retryAt > now);
     const reservations = accountIds
       ? state.reservations.filter(
-          (reservation) => accountIds.has(reservation.accountId) && reservation.expiresAt > now,
+          (reservation) =>
+            reservation.kind === "primer" &&
+            accountIds.has(reservation.accountId) &&
+            reservation.expiresAt > now,
         )
       : [];
-    if (blocks.length === 0 && reservations.length === 0) {
+    const unavailableAccountIds = new Set([
+      ...blocks.map((block) => block.accountId),
+      ...reservations.map((reservation) => reservation.accountId),
+    ]);
+    if (
+      accountIds
+        ? accountIds.size === 0 ||
+          [...accountIds].some((accountId) => !unavailableAccountIds.has(accountId))
+        : blocks.length === 0
+    ) {
       return;
     }
     const retryTimes = [

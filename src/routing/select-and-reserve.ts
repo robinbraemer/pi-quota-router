@@ -6,8 +6,8 @@ import { type SelectionInput, selectAccount } from "./selection-policy.ts";
 
 export interface ReservedSelection {
   decision: SelectionDecision;
-  recoverableAccountIds: string[];
   reservation?: Reservation;
+  foregroundActiveBefore?: number;
 }
 
 export async function selectAndReserve(input: {
@@ -25,40 +25,29 @@ export async function selectAndReserve(input: {
     );
     const candidates = input.request.candidates.map((candidate) => {
       const block = state.blocks.find((value) => value.accountId === candidate.accountId);
-      const reservation = liveReservations.find((value) => value.accountId === candidate.accountId);
-      const { block: _staleBlock, reservation: _staleReservation, ...current } = candidate;
+      const primerLease = liveReservations.find(
+        (value) => value.kind === "primer" && value.accountId === candidate.accountId,
+      );
+      const { block: _staleBlock, primerLease: _stalePrimerLease, ...current } = candidate;
       return {
         ...current,
         ...(block ? { block } : {}),
-        ...(reservation ? { reservation } : {}),
+        ...(primerLease ? { primerLease } : {}),
       };
     });
-    const eligibleForAttempt = input.excludedAccountIds
-      ? candidates.filter((candidate) => !input.excludedAccountIds?.has(candidate.accountId))
-      : candidates;
+    const selectableCandidates = candidates.filter(
+      (candidate) =>
+        !input.excludedAccountIds?.has(candidate.accountId) &&
+        (!input.request.config.manualAccountId ||
+          candidate.accountId === input.request.config.manualAccountId),
+    );
     const decision = selectAccount({
       ...input.request,
-      candidates: eligibleForAttempt,
+      candidates: selectableCandidates,
       now: input.now,
     });
-    const recoverableAccountIds = candidates
-      .filter((candidate) => {
-        const explanation = decision.candidates.find(
-          (value) => value.accountId === candidate.accountId,
-        );
-        const excluded = input.excludedAccountIds?.has(candidate.accountId) ?? false;
-        return (
-          ((excluded || explanation?.rejectionCode === "blocked") &&
-            candidate.block?.retryAt !== undefined &&
-            candidate.block.retryAt > input.now) ||
-          ((excluded || explanation?.rejectionCode === "reserved") &&
-            candidate.reservation !== undefined &&
-            candidate.reservation.expiresAt > input.now)
-        );
-      })
-      .map((candidate) => candidate.accountId);
     if (!decision.accountId) {
-      result = { decision, recoverableAccountIds };
+      result = { decision };
       return { ...state, reservations: liveReservations, lastSelection: decision };
     }
 
@@ -70,7 +59,10 @@ export async function selectAndReserve(input: {
       expiresAt: input.now + input.request.config.reservationTtlMs,
       kind: "foreground",
     };
-    result = { decision, recoverableAccountIds, reservation };
+    const foregroundActiveBefore = liveReservations.filter(
+      (value) => value.kind === "foreground" && value.accountId === decision.accountId,
+    ).length;
+    result = { decision, reservation, foregroundActiveBefore };
     return {
       ...state,
       reservations: [...liveReservations, reservation],

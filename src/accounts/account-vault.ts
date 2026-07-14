@@ -5,6 +5,7 @@ import type { OAuthCredentials } from "@earendil-works/pi-ai/oauth";
 import lockfile from "proper-lockfile";
 import type { AtomicJsonStore } from "../storage/atomic-json-store.ts";
 import type { AccountVaultFile } from "../storage/schemas.ts";
+import { raceWithSignal } from "../util/abort.ts";
 import {
   deriveManagedAccountId,
   extractCodexAccountId,
@@ -225,23 +226,25 @@ export function createAccountVault(options: AccountVaultOptions): AccountVault {
       if (!needsRefresh(account.expiresAt, options.clock())) {
         return toFreshCredential(account);
       }
+      signal?.throwIfAborted();
 
       const pending = refreshes.get(id);
       if (pending) {
-        return awaitWithSignal(pending, signal);
+        return raceWithSignal(pending, signal);
       }
-      return awaitWithSignal(startRefresh(id), signal);
+      return raceWithSignal(startRefresh(id), signal);
     },
 
     async forceRefreshCredential(id, rejectedAccessToken, signal) {
+      signal?.throwIfAborted();
       const pending = refreshes.get(id);
       if (pending) {
-        const credential = await awaitWithSignal(pending, signal);
+        const credential = await raceWithSignal(pending, signal);
         if (credential.accessToken !== rejectedAccessToken) {
           return credential;
         }
       }
-      return awaitWithSignal(startRefresh(id, rejectedAccessToken), signal);
+      return raceWithSignal(startRefresh(id, rejectedAccessToken), signal);
     },
 
     async remove(id) {
@@ -276,27 +279,6 @@ export function createAccountVault(options: AccountVaultOptions): AccountVault {
 
 function needsRefresh(expiresAt: number, now: number): boolean {
   return expiresAt <= now + REFRESH_EARLY_MS;
-}
-
-function awaitWithSignal<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
-  if (!signal) {
-    return promise;
-  }
-  signal.throwIfAborted();
-  return new Promise<T>((resolve, reject) => {
-    const onAbort = () => reject(signal.reason);
-    signal.addEventListener("abort", onAbort, { once: true });
-    promise.then(
-      (value) => {
-        signal.removeEventListener("abort", onAbort);
-        resolve(value);
-      },
-      (error) => {
-        signal.removeEventListener("abort", onAbort);
-        reject(error);
-      },
-    );
-  });
 }
 
 async function markNeedsReauth(

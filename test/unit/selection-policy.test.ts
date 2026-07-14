@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { defaultConfig } from "../../src/config.ts";
 import { selectAccount, weeklyUrgency } from "../../src/routing/selection-policy.ts";
+import type { Reservation } from "../../src/types.ts";
 import { candidate, usage } from "../fixtures/candidates.ts";
 
 const NOW = 2_000_000_000_000;
@@ -53,6 +54,29 @@ describe("quota-aware selection", () => {
     );
   });
 
+  test("routes a weekly-only account without inventing short headroom", () => {
+    const decision = selectAccount({
+      candidates: [
+        candidate("weekly-only", NOW, {
+          shortWindow: false,
+          weeklyRemaining: 97,
+          resetHours: 168,
+        }),
+      ],
+      config: defaultConfig,
+      now: NOW,
+    });
+
+    expect(decision.accountId).toBe("weekly-only");
+    expect(decision.candidates[0]).toEqual(
+      expect.objectContaining({
+        eligible: true,
+        weeklyRemainingPercent: 97,
+      }),
+    );
+    expect(decision.candidates[0]?.shortWindowRemainingPercent).toBeUndefined();
+  });
+
   test("uses fresh candidates before penalized stale fallback data", () => {
     const decision = selectAccount({
       candidates: [
@@ -88,6 +112,22 @@ describe("quota-aware selection", () => {
     expect(decision.reason).toBe("no_eligible_accounts");
   });
 
+  test("excludes a snapshot after its weekly reset clock elapses", () => {
+    const decision = selectAccount({
+      candidates: [
+        candidate("expired", NOW, { weeklyRemaining: 90, resetHours: -1 }),
+        candidate("valid", NOW, { weeklyRemaining: 20, resetHours: 20 }),
+      ],
+      config: defaultConfig,
+      now: NOW,
+    });
+
+    expect(decision.accountId).toBe("valid");
+    expect(decision.candidates.find((value) => value.accountId === "expired")).toEqual(
+      expect.objectContaining({ rejectionCode: "weekly_reset_elapsed" }),
+    );
+  });
+
   test("honors a healthy manual account and reports an unhealthy override", () => {
     const forced = candidate("forced", NOW, {
       shortRemaining: 1,
@@ -109,6 +149,86 @@ describe("quota-aware selection", () => {
     });
     expect(unhealthy.accountId).toBeUndefined();
     expect(unhealthy.reason).toBe("manual_account_unavailable");
+  });
+
+  test("rejects a live primer lease in automatic and manual routing", () => {
+    const primerLease: Reservation = {
+      accountId: "forced",
+      leaseToken: "synthetic-primer-lease",
+      owner: {
+        processId: 7,
+        sessionId: "other-session",
+        requestId: "other-request",
+      },
+      createdAt: NOW,
+      expiresAt: NOW + 60_000,
+      kind: "primer",
+    };
+    const automatic = selectAccount({
+      candidates: [{ ...candidate("forced", NOW), primerLease }, candidate("healthy", NOW)],
+      config: defaultConfig,
+      now: NOW,
+    });
+    expect(automatic.accountId).toBe("healthy");
+    expect(automatic.candidates[0]?.rejectionCode).toBe("primer_active");
+
+    const manual = selectAccount({
+      candidates: [{ ...candidate("forced", NOW), primerLease }],
+      config: { ...defaultConfig, manualAccountId: "forced" },
+      now: NOW,
+    });
+    expect(manual.reason).toBe("manual_account_unavailable");
+    expect(manual.candidates[0]?.rejectionCode).toBe("primer_active");
+  });
+
+  test("ignores an expired primer lease", () => {
+    const expiredPrimer: Reservation = {
+      accountId: "expired-primer",
+      leaseToken: "synthetic-expired-primer",
+      owner: { processId: 7, sessionId: "session", requestId: "request" },
+      createdAt: NOW - 120_000,
+      expiresAt: NOW - 1,
+      kind: "primer",
+    };
+    const decision = selectAccount({
+      candidates: [{ ...candidate("expired-primer", NOW), primerLease: expiredPrimer }],
+      config: defaultConfig,
+      now: NOW,
+    });
+    expect(decision.accountId).toBe("expired-primer");
+  });
+
+  test("reports reauthentication and blocks before primer activity", () => {
+    const primerLease: Reservation = {
+      accountId: "a",
+      leaseToken: "synthetic-primer-ordering",
+      owner: { processId: 7, sessionId: "session", requestId: "request" },
+      createdAt: NOW,
+      expiresAt: NOW + 60_000,
+      kind: "primer",
+    };
+    const decision = selectAccount({
+      candidates: [
+        { ...candidate("reauth", NOW), needsReauth: true, primerLease },
+        {
+          ...candidate("blocked", NOW),
+          block: {
+            accountId: "blocked",
+            kind: "quota",
+            blockedAt: NOW,
+            retryAt: NOW + 1,
+            estimated: false,
+          },
+          primerLease,
+        },
+      ],
+      config: defaultConfig,
+      now: NOW,
+    });
+    expect(decision.candidates.map((value) => value.rejectionCode)).toEqual([
+      "needs_reauth",
+      "blocked",
+    ]);
   });
 
   test("retains the current account inside the ten-percent hysteresis band", () => {
@@ -143,6 +263,29 @@ describe("quota-aware selection", () => {
     expect(lexical.accountId).toBe("a");
   });
 
+  test("uses stable ids for mixed short-window ties regardless of input order", () => {
+    const lowShort = candidate("a", NOW, { shortRemaining: 70 });
+    const weeklyOnly = candidate("b", NOW, { shortWindow: false });
+    const highShort = candidate("c", NOW, { shortRemaining: 80 });
+    const permutations = [
+      [lowShort, weeklyOnly, highShort],
+      [lowShort, highShort, weeklyOnly],
+      [weeklyOnly, lowShort, highShort],
+      [weeklyOnly, highShort, lowShort],
+      [highShort, lowShort, weeklyOnly],
+      [highShort, weeklyOnly, lowShort],
+    ];
+
+    for (const candidates of permutations) {
+      const decision = selectAccount({
+        candidates,
+        config: defaultConfig,
+        now: NOW,
+      });
+      expect(decision.accountId).toBe("a");
+    }
+  });
+
   test("computes weekly remaining per hour", () => {
     expect(
       weeklyUrgency(
@@ -155,5 +298,19 @@ describe("quota-aware selection", () => {
         NOW,
       ),
     ).toBeCloseTo(0.25);
+  });
+
+  test("does not assign urgency to an elapsed weekly reset", () => {
+    expect(
+      weeklyUrgency(
+        usage({
+          accountId: "a",
+          now: NOW,
+          weeklyRemaining: 50,
+          resetHours: -1,
+        }),
+        NOW,
+      ),
+    ).toBe(0);
   });
 });

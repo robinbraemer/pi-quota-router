@@ -241,6 +241,7 @@ export function createPrimingController(options: PrimingControllerOptions): Prim
 function isUntouchedCandidate(snapshot: UsageSnapshot): boolean {
   return (
     !snapshot.stale &&
+    snapshot.shortWindow !== undefined &&
     snapshot.shortWindow.usedPercent === 0 &&
     snapshot.weeklyWindow?.usedPercent === 0 &&
     snapshot.weeklyWindow.resetsAt === undefined
@@ -256,7 +257,11 @@ async function reservePrimerAccount(
   let acquired: Reservation | undefined;
   await options.stateStore.update((state) => {
     const reservations = state.reservations.filter((value) => value.expiresAt > now);
-    if (reservations.some((value) => value.accountId === accountId)) {
+    const blocked = state.blocks.some(
+      (value) =>
+        value.accountId === accountId && (value.retryAt === undefined || value.retryAt > now),
+    );
+    if (blocked || reservations.some((value) => value.accountId === accountId)) {
       return { ...state, reservations };
     }
     acquired = {

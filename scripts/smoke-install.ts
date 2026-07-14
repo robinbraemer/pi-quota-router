@@ -1,34 +1,43 @@
 import { mkdir, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { OPENAI_CODEX_MODELS } from "@earendil-works/pi-ai/providers/openai-codex.models";
 
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const source =
-  process.env.PI_QUOTA_ROUTER_GIT_SOURCE ?? "git:git@github.com:robinbraemer/pi-quota-router";
-const root = await mkdtemp(join(tmpdir(), "pi-quota-router-github-smoke-"));
+const configuredSource = process.env.PI_QUOTA_ROUTER_GIT_SOURCE;
+const credentialFree = process.env.PI_QUOTA_ROUTER_CREDENTIAL_FREE === "1";
+const root = await mkdtemp(join(tmpdir(), "pi-quota-router-git-smoke-"));
 const agentDirectory = join(root, "agent");
 const project = join(root, "project");
+let server: ReturnType<typeof Bun.serve> | undefined;
 
 try {
   const revision = (
     await run(["git", "rev-parse", process.env.PI_QUOTA_ROUTER_GIT_REVISION ?? "HEAD"], repository)
   ).trim();
-  const remoteRefs = await run(["git", "ls-remote", "origin"], repository);
-  if (!remoteRefs.includes(revision)) {
-    throw new Error(
-      `HEAD ${revision.slice(0, 12)} is not pushed to origin; the GitHub install smoke only tests published commits`,
-    );
+  let source = configuredSource;
+  if (source === undefined) {
+    const local = await createLocalGitSource(root, repository, revision);
+    source = local.source;
+    server = local.server;
   }
 
   await mkdir(project, { recursive: true });
-  const env = {
-    ...process.env,
-    PI_CODING_AGENT_DIR: agentDirectory,
-    GIT_TERMINAL_PROMPT: "0",
-    GIT_SSH_COMMAND: process.env.GIT_SSH_COMMAND ?? "ssh -o BatchMode=yes -o ConnectTimeout=10",
-  };
+  const env = installEnvironment(root, agentDirectory, credentialFree);
+
+  if (process.env.PI_QUOTA_ROUTER_REQUIRE_PUBLISHED_REVISION === "1") {
+    if (configuredSource === undefined) {
+      throw new Error("Published-revision validation requires PI_QUOTA_ROUTER_GIT_SOURCE");
+    }
+    const remoteRefs = await run(["git", "ls-remote", gitRemote(configuredSource)], project, env);
+    if (!remoteRefs.includes(revision)) {
+      throw new Error(
+        `HEAD ${revision.slice(0, 12)} is not pushed to origin; the remote GitHub install smoke only tests published commits`,
+      );
+    }
+  }
+
   const pinnedSource = `${source}@${revision}`;
   await run([piExecutable(), "install", pinnedSource, "--no-approve"], project, env);
   const installed = await run([piExecutable(), "--list-models", "openai-codex"], project, env);
@@ -57,13 +66,98 @@ try {
     }
   }
 
-  console.log(`GitHub install smoke passed for ${pinnedSource} (${listedModels} Codex models).`);
+  console.log(`Git install smoke passed for ${pinnedSource} (${listedModels} Codex models).`);
 } finally {
+  server?.stop(true);
   await rm(root, { recursive: true, force: true });
+}
+
+async function createLocalGitSource(
+  root: string,
+  sourceRepository: string,
+  revision: string,
+): Promise<{ source: string; server: ReturnType<typeof Bun.serve> }> {
+  const bareRepository = join(root, "repository.git");
+  await run(["git", "init", "--bare", bareRepository], sourceRepository);
+  await run(
+    ["git", "-C", bareRepository, "fetch", "--no-tags", sourceRepository, revision],
+    sourceRepository,
+  );
+  await run(
+    ["git", "-C", bareRepository, "update-ref", "refs/heads/smoke", "FETCH_HEAD"],
+    sourceRepository,
+  );
+  await run(
+    ["git", "-C", bareRepository, "symbolic-ref", "HEAD", "refs/heads/smoke"],
+    sourceRepository,
+  );
+  await run(["git", "-C", bareRepository, "update-server-info"], sourceRepository);
+
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request) {
+      const pathname = decodeURIComponent(new URL(request.url).pathname);
+      const prefix = "/local/repository.git/";
+      if (!pathname.startsWith(prefix)) return new Response(null, { status: 404 });
+
+      const path = resolve(bareRepository, pathname.slice(prefix.length));
+      if (!path.startsWith(`${bareRepository}${sep}`)) return new Response(null, { status: 404 });
+
+      const file = Bun.file(path);
+      if (!(await file.exists())) return new Response(null, { status: 404 });
+      return new Response(file);
+    },
+  });
+
+  return {
+    source: `git:http://127.0.0.1:${server.port}/local/repository.git`,
+    server,
+  };
 }
 
 function piExecutable(): string {
   return process.env.PI_EXECUTABLE ?? join(repository, "node_modules", ".bin", "pi");
+}
+
+function installEnvironment(
+  root: string,
+  agentDirectory: string,
+  credentialFree: boolean,
+): Record<string, string | undefined> {
+  if (!credentialFree) {
+    return {
+      ...process.env,
+      PI_CODING_AGENT_DIR: agentDirectory,
+      GIT_TERMINAL_PROMPT: "0",
+    };
+  }
+
+  return {
+    PATH: `${process.env.PATH ?? ""}:/usr/local/bin:/usr/bin:/bin`,
+    HOME: join(root, "home"),
+    TMPDIR: root,
+    PI_CODING_AGENT_DIR: agentDirectory,
+    NPM_CONFIG_USERCONFIG: join(root, "npmrc"),
+    NPM_CONFIG_GLOBALCONFIG: join(root, "global-npmrc"),
+    NPM_CONFIG_CACHE: join(root, "npm-cache"),
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_CONFIG_COUNT: "1",
+    GIT_CONFIG_KEY_0: "credential.helper",
+    GIT_CONFIG_VALUE_0: "",
+    GIT_TERMINAL_PROMPT: "0",
+    GIT_ASKPASS: "/usr/bin/false",
+    SSH_ASKPASS: "/usr/bin/false",
+    GIT_SSH_COMMAND: "/usr/bin/false",
+    GIT_ALLOW_PROTOCOL: "https",
+    GCM_INTERACTIVE: "never",
+  };
+}
+
+function gitRemote(source: string): string {
+  if (!source.startsWith("git:")) throw new Error(`Unsupported Git source ${source}`);
+  return source.slice("git:".length);
 }
 
 async function run(

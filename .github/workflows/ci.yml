@@ -42,14 +42,21 @@ jobs:
       - name: Scan tracked files and test output for secrets
         run: bun run check:secrets
 
-      - name: Configure private GitHub clone
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: git config --global url."https://x-access-token:${GITHUB_TOKEN}@github.com/".insteadOf "git@github.com:"
+      - name: Check public documentation hygiene
+        run: bun run check:public-hygiene
 
-      - name: Smoke-test Pi's GitHub install path
+      - name: Smoke-test Pi's local Git install path
         env:
           PI_QUOTA_ROUTER_GIT_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: bun run smoke:install
+
+      - name: Smoke-test Pi's public HTTPS Git install path
+        if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+        env:
+          PI_QUOTA_ROUTER_GIT_SOURCE: git:${{ github.event.pull_request.head.repo.clone_url || 'https://github.com/robinbraemer/pi-quota-router.git' }}
+          PI_QUOTA_ROUTER_GIT_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+          PI_QUOTA_ROUTER_REQUIRE_PUBLISHED_REVISION: "1"
+          PI_QUOTA_ROUTER_CREDENTIAL_FREE: "1"
         run: bun run smoke:install
 
       - name: Check package contents

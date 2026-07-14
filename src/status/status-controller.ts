@@ -12,7 +12,10 @@ export function formatCompactStatus(view: StatusView & { now: number }): string 
   if (!view.snapshot) {
     return `Codex · ${view.label} · ${view.mode}`;
   }
-  const shortRemaining = Math.max(0, Math.round(100 - view.snapshot.shortWindow.usedPercent));
+  const shortRemaining =
+    view.snapshot.shortWindow === undefined
+      ? "n/a"
+      : `${Math.max(0, Math.round(100 - view.snapshot.shortWindow.usedPercent))}%`;
   const weeklyRemaining =
     view.snapshot.weeklyWindow === undefined
       ? "?"
@@ -22,7 +25,7 @@ export function formatCompactStatus(view: StatusView & { now: number }): string 
       ? "?"
       : formatDuration(view.snapshot.weeklyWindow.resetsAt - view.now);
   const urgency = view.urgency === undefined ? "?" : view.urgency.toFixed(3);
-  return `Codex · ${view.label} · 5h ${shortRemaining}% · 7d ${weeklyRemaining}%/${reset} · urgent ${urgency}/h · ${view.mode}`;
+  return `Codex · ${view.label} · 5h ${shortRemaining} · 7d ${weeklyRemaining}%/${reset} · urgent ${urgency}/h · ${view.mode}`;
 }
 
 export function createStatusController(options: {

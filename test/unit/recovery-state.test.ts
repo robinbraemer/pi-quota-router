@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { blockFromFailure, reconcileUsageBlock } from "../../src/recovery/recovery-state.ts";
+import {
+  blockFromFailure,
+  blockFromUsage,
+  reconcileUsageBlock,
+} from "../../src/recovery/recovery-state.ts";
 import type { UsageSnapshot } from "../../src/types.ts";
 
 const NOW = 2_000_000_000_000;
@@ -36,6 +40,27 @@ describe("recovery state", () => {
     expect(block).toEqual(expect.objectContaining({ retryAt: NOW + 3_600_000, estimated: true }));
   });
 
+  test("derives a quota block from an exhausted weekly-only window", () => {
+    expect(
+      blockFromUsage(
+        "a",
+        {
+          accountId: "a",
+          observedAt: NOW,
+          weeklyWindow: { usedPercent: 100, resetsAt: NOW + 604_800_000 },
+          stale: false,
+        },
+        NOW,
+      ),
+    ).toEqual({
+      accountId: "a",
+      kind: "quota",
+      blockedAt: NOW,
+      retryAt: NOW + 604_800_000,
+      estimated: false,
+    });
+  });
+
   test("fresh authoritative usage replaces an estimated cooldown", () => {
     const block = blockFromFailure("a", { kind: "quota" }, undefined, NOW);
     const shorter = reconcileUsageBlock(block, exhausted(NOW + 1_800_000, NOW + 7_200_000), NOW);
@@ -46,5 +71,19 @@ describe("recovery state", () => {
       NOW,
     );
     expect(longer?.retryAt).toBe(NOW + 10_800_000);
+  });
+
+  test("fresh usage preserves estimated transient and auth cooldowns", () => {
+    const usage = exhausted();
+    const transient = blockFromFailure(
+      "a",
+      { kind: "transient", retryAt: NOW + 60_000 },
+      undefined,
+      NOW,
+    );
+    const auth = blockFromFailure("a", { kind: "auth-retry" }, undefined, NOW);
+
+    expect(reconcileUsageBlock(transient, usage, NOW)).toEqual(transient);
+    expect(reconcileUsageBlock(auth, usage, NOW)).toEqual(auth);
   });
 });
