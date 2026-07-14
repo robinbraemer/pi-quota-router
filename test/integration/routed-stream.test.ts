@@ -542,6 +542,33 @@ describe("RoutedStream", () => {
     expect(setup.released.sort()).toEqual(["lease-a", "lease-b"]);
   });
 
+  test("rotates provider timeout terminal events before output", async () => {
+    for (const timeoutMessage of [
+      "Codex SSE response headers timed out after 30000ms",
+      "WebSocket idle timeout after 300000ms",
+    ]) {
+      const setup = dependencies(["a", "b"], (_model, _context, options) =>
+        options?.apiKey === "token-a"
+          ? eventStream([
+              start(),
+              {
+                type: "error",
+                reason: "error",
+                error: message("error", timeoutMessage),
+              },
+            ])
+          : eventStream(successfulText()),
+      );
+
+      const events = await collect(createRoutedStream(setup.value)(model, context));
+
+      expect(events.at(-1)?.type).toBe("done");
+      expect(setup.selected).toEqual(["a", "b"]);
+      expect(setup.recorded).toEqual(["a"]);
+      expect(setup.released.sort()).toEqual(["lease-a", "lease-b"]);
+    }
+  });
+
   test("external cancellation after output preserves the latest partial and releases once", async () => {
     const visiblePartial: AssistantMessage = {
       ...message(),

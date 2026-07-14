@@ -56,6 +56,18 @@ describe("failure classifier", () => {
     }
   });
 
+  test("classifies provider-owned Codex timeout messages as transient", () => {
+    for (const error of [
+      "Codex SSE response headers timed out after 30000ms",
+      "WebSocket idle timeout after 300000ms",
+    ]) {
+      expect(classifyFailure(error, NOW)).toEqual({
+        kind: "transient",
+        retryAt: NOW + 60_000,
+      });
+    }
+  });
+
   test("keeps reservation loss fatal despite a transient diagnostic cause", () => {
     const cause = Object.assign(new Error("reservation store timed out"), {
       code: "ETIMEDOUT",

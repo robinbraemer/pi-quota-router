@@ -71,7 +71,9 @@ export function classifyFailure(error: unknown, now: number): FailureClass {
       "und_err_socket",
     ) ||
     hasName("timeouterror") ||
-    hasMessage("fetch failed")
+    hasMessage("fetch failed") ||
+    hasMessage("codex sse response headers timed out") ||
+    hasMessage("websocket idle timeout")
   ) {
     return { kind: "transient", retryAt: now + 60_000 };
   }
