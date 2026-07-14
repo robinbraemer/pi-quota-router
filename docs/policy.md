@@ -66,7 +66,7 @@ Primer work renews both its singleton sweep lease and account lease. Foreground 
 - Any text, thinking, or tool-call start makes replay unsafe; later errors are forwarded without account rotation.
 - The router does not infer provider failure from a period without Pi-normalized assistant events. It forwards `SimpleStreamOptions.timeoutMs` unchanged: an omitted value remains omitted, while an explicit value is validated and enforced by Pi's Codex provider.
 - A concrete replay-safe provider error before model-visible output may rotate according to its existing failure classification. Silence alone does not exclude, block, or mutate the health of an account.
-- User cancellation and reservation-renewal failure abort the provider iterator. After the replay boundary they preserve the latest partial content and usage, terminate without replay, and release the reservation exactly once.
+- User cancellation and reservation-renewal failure abort the provider iterator. Reservation loss terminates the request without account rotation or an account-health failure record. After the replay boundary, both paths preserve the latest partial content and usage and terminate without replay. Every terminal path for an acquired reservation stops renewal and releases it exactly once.
 - A request performs at most five account attempts.
 - An explicit provider retry time controls a quota block. Otherwise the latest observed reset across exhausted windows is used; without either, the estimate is one hour.
 - If fresh selection finds no eligible account, the foreground stream emits one sanitized terminal error immediately. A later retry performs a new selection pass and can use recovered quota or account health.
