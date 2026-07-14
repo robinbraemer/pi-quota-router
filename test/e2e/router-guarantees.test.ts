@@ -58,10 +58,11 @@ async function selectPrimerFenceWorker(input: {
   accountIds?: string;
   environment?: Record<string, string>;
   startBarrier?: { path: string; releaseDelayMs: number };
+  command?: string[];
 }): Promise<{ accountId?: string }> {
   const worker = new URL("../helpers/worker-select.ts", import.meta.url).pathname;
   const child = Bun.spawn(
-    [
+    input.command ?? [
       process.execPath,
       worker,
       input.fixture.file,
@@ -87,8 +88,9 @@ async function selectPrimerFenceWorker(input: {
     new Response(child.stderr).text(),
   ]);
   try {
+    let stagedWorkerState: "ready" | "exited-before-ready" | undefined;
     if (input.startBarrier) {
-      await releaseStagedWorker({
+      stagedWorkerState = await releaseStagedWorker({
         barrier: input.startBarrier.path,
         requestId: input.requestId,
         releaseDelayMs: input.startBarrier.releaseDelayMs,
@@ -96,6 +98,15 @@ async function selectPrimerFenceWorker(input: {
       });
     }
     const [exitCode, stdout, stderr] = await result;
+    if (stagedWorkerState === "exited-before-ready") {
+      throw new Error(
+        [
+          `foreground worker exited with code ${exitCode} before staged worker ready`,
+          `stdout:\n${stdout}`,
+          `stderr:\n${stderr}`,
+        ].join("\n"),
+      );
+    }
     if (exitCode !== 0 || stderr !== "") {
       throw new Error(
         [
@@ -123,7 +134,7 @@ async function releaseStagedWorker(input: {
   requestId: string;
   releaseDelayMs: number;
   workerExited: Promise<number>;
-}): Promise<void> {
+}): Promise<"ready" | "exited-before-ready"> {
   const polling = new AbortController();
   const ready = waitForFile(`${input.barrier}.${input.requestId}.ready`, polling.signal);
   let readinessTimer: ReturnType<typeof setTimeout> | undefined;
@@ -143,12 +154,13 @@ async function releaseStagedWorker(input: {
       clearTimeout(readinessTimer);
       readinessTimer = undefined;
     }
-    if (state === "exited") return;
+    if (state === "exited") return "exited-before-ready";
     const releaseDelay = new Promise<true>((resolve) => {
       releaseTimer = setTimeout(() => resolve(true), input.releaseDelayMs);
     });
     const release = await Promise.race([releaseDelay, input.workerExited.then(() => false)]);
     if (release) await writeFile(input.barrier, "release", "utf8");
+    return "ready";
   } finally {
     if (readinessTimer !== undefined) clearTimeout(readinessTimer);
     if (releaseTimer !== undefined) clearTimeout(releaseTimer);
@@ -345,6 +357,11 @@ describe("quota router end-to-end guarantees", () => {
         })
       ).accountId,
     ).toBe("b");
+    expect(
+      await access(`${barrier}.staged-worker.ready`)
+        .then(() => true)
+        .catch(() => false),
+    ).toBeTrue();
   });
 
   test("preserves worker failure output when a staged worker exits before ready", async () => {
@@ -371,6 +388,33 @@ describe("quota router end-to-end guarantees", () => {
     if (!(failure instanceof Error)) throw new Error("expected staged worker failure");
     expect(failure.message).toContain("foreground worker exited with code");
     expect(failure.message).toContain("EEXIST");
+    expect(failure.message).not.toContain("staged worker readiness timed out");
+  });
+
+  test("rejects a clean worker exit before the staged ready marker", async () => {
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    const workerOutput = `${JSON.stringify({ accountId: "a" })}\n`;
+
+    let failure: unknown;
+    try {
+      await selectPrimerFenceWorker({
+        fixture,
+        requestId: "clean-pre-ready-exit",
+        command: [process.execPath, "-e", `process.stdout.write(${JSON.stringify(workerOutput)})`],
+        startBarrier: {
+          path: join(fixture.directory, "clean-pre-ready-release"),
+          releaseDelayMs: 5_100,
+        },
+      });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toBeInstanceOf(Error);
+    if (!(failure instanceof Error)) throw new Error("expected staged worker protocol failure");
+    expect(failure.message).toContain("before staged worker ready");
+    expect(failure.message).toContain(workerOutput.trim());
     expect(failure.message).not.toContain("staged worker readiness timed out");
   });
 

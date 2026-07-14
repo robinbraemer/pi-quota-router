@@ -272,7 +272,15 @@ export function createRoutedStream(
               if (pendingStart) {
                 output.push(pendingStart);
               }
-              output.push(errorEvent(model, options?.signal?.aborted ? "aborted" : "error", error));
+              const reason = options?.signal?.aborted ? "aborted" : "error";
+              output.push(
+                errorEvent(
+                  model,
+                  reason,
+                  error,
+                  reason === "aborted" && !boundary.isReplaySafe() ? latestPartial : undefined,
+                ),
+              );
               return;
             }
           }

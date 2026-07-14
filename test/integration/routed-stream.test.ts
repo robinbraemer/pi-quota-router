@@ -660,6 +660,19 @@ describe("RoutedStream", () => {
   });
 
   test("external cancellation wins before, at, and immediately after a silence deadline", async () => {
+    const visiblePartial: AssistantMessage = {
+      ...message(),
+      content: [{ type: "text", text: "partial before cancellation" }],
+      usage: {
+        input: 13,
+        output: 8,
+        cacheRead: 5,
+        cacheWrite: 3,
+        reasoning: 4,
+        totalTokens: 29,
+        cost: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, total: 10 },
+      },
+    };
     for (const timing of ["before", "at", "after"] as const) {
       const timers = new FakeTimers();
       const controller = new AbortController();
@@ -680,6 +693,12 @@ describe("RoutedStream", () => {
               contentIndex: 0,
               partial: message(),
             } as AssistantMessageEvent;
+            yield {
+              type: "text_delta",
+              contentIndex: 0,
+              delta: "partial before cancellation",
+              partial: visiblePartial,
+            } as AssistantMessageEvent;
             entered?.();
             const signal = options?.signal;
             if (!signal) throw new Error("missing routed abort signal");
@@ -691,6 +710,7 @@ describe("RoutedStream", () => {
       setup.value.timers = timers;
       const routed = createRoutedStream(setup.value);
       const stream = routed(model, context, { signal: controller.signal, timeoutMs: 1 });
+      const result = collect(stream);
 
       await enteredAttempt;
       if (timing === "before") controller.abort(new Error("user cancelled"));
@@ -700,10 +720,21 @@ describe("RoutedStream", () => {
         controller.abort(new Error("user cancelled"));
       }
       await flushAsyncWork();
-      const terminal = await stream.result();
+      const events = await result;
 
-      expect(terminal.stopReason).toBe("aborted");
-      expect(terminal.errorMessage).toBe("The Codex request was cancelled");
+      expect(events.map((event) => event.type)).toEqual([
+        "start",
+        "text_start",
+        "text_delta",
+        "error",
+      ]);
+      const terminal = events.at(-1);
+      expect(terminal?.type).toBe("error");
+      if (terminal?.type !== "error") throw new Error("expected a terminal error event");
+      expect(terminal.error.content).toEqual(visiblePartial.content);
+      expect(terminal.error.usage).toEqual(visiblePartial.usage);
+      expect(terminal.error.stopReason).toBe("aborted");
+      expect(terminal.error.errorMessage).toBe("The Codex request was cancelled");
       expect(setup.recorded).toEqual([]);
       expect(setup.released).toEqual(["lease-a"]);
       expect(timers.pending).toBe(0);
