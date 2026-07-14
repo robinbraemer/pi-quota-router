@@ -1,3 +1,5 @@
+import { ReservationLostError } from "../routing/reservation-heartbeat.ts";
+
 export type FailureClass =
   | { kind: "quota"; retryAt?: number }
   | { kind: "auth-retry" }
@@ -7,6 +9,9 @@ export type FailureClass =
   | { kind: "aborted" };
 
 export function classifyFailure(error: unknown, now: number): FailureClass {
+  if (error instanceof ReservationLostError) {
+    return { kind: "fatal" };
+  }
   const errors = errorChain(error);
   const status = firstNumber(errors, "status") ?? firstNumber(errors, "statusCode");
   const codes = errors.map((value) => stringProperty(value, "code").toLowerCase());

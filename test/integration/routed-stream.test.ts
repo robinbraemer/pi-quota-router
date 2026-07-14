@@ -900,6 +900,60 @@ describe("RoutedStream", () => {
     }
   });
 
+  test("does not poison or rotate an account after renewal rejection", async () => {
+    const renewalCause = Object.assign(new Error("reservation store timed out"), {
+      code: "ETIMEDOUT",
+    });
+    const baseStream = ((
+      _model: Model<"openai-codex-responses">,
+      _context: Context,
+      options?: SimpleStreamOptions,
+    ) => {
+      if (options?.apiKey === "token-b") {
+        return eventStream(successfulText());
+      }
+      return (async function* () {
+        yield start();
+        const signal = options?.signal;
+        if (!signal) throw new Error("renewal fixture requires a heartbeat signal");
+        signal.throwIfAborted();
+        await new Promise<void>((_resolve, reject) => {
+          signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+        });
+      })();
+    }) as unknown as RoutedStreamDependencies["baseStream"];
+    const setup = dependencies(["a", "b"], baseStream);
+    setup.value.selectAndReserve = async ({ excludedAccountIds }) => {
+      const accountId = ["a", "b"].find((candidate) => !excludedAccountIds.has(candidate));
+      if (!accountId) return { kind: "unavailable", reason: "no_eligible_accounts" };
+      setup.selected.push(accountId);
+      return {
+        kind: "selected",
+        lease: {
+          accountId,
+          leaseToken: `lease-${accountId}`,
+          reservationTtlMs: 15,
+        },
+      };
+    };
+    setup.value.renew = async (leaseToken) => {
+      if (leaseToken === "lease-a") throw renewalCause;
+      return true;
+    };
+
+    const events = await collect(createRoutedStream(setup.value)(model, context));
+    const terminal = events.at(-1);
+
+    expect(events.map((event) => event.type)).toEqual(["start", "error"]);
+    expect(terminal?.type).toBe("error");
+    if (terminal?.type !== "error") throw new Error("expected renewal rejection error");
+    expect(terminal.error.errorMessage).toBe("The Codex account reservation could not be renewed");
+    expect(setup.selected).toEqual(["a"]);
+    expect(setup.recorded).toEqual([]);
+    expect(setup.released).toEqual(["lease-a"]);
+    expect(setup.succeeded).toEqual([]);
+  });
+
   test("normalizes rejected renewal while preserving visible output", async () => {
     const visiblePartial: AssistantMessage = {
       ...message(),

@@ -4,6 +4,7 @@ import {
   TokenRefreshTransientError,
 } from "../../src/accounts/account-vault.ts";
 import { classifyFailure } from "../../src/recovery/failure-classifier.ts";
+import { ReservationLostError } from "../../src/routing/reservation-heartbeat.ts";
 
 const NOW = 2_000_000_000_000;
 
@@ -53,6 +54,14 @@ describe("failure classifier", () => {
         retryAt: NOW + 60_000,
       });
     }
+  });
+
+  test("keeps reservation loss fatal despite a transient diagnostic cause", () => {
+    const cause = Object.assign(new Error("reservation store timed out"), {
+      code: "ETIMEDOUT",
+    });
+
+    expect(classifyFailure(new ReservationLostError(cause), NOW)).toEqual({ kind: "fatal" });
   });
 
   test("classifies sanitized credential errors by their typed names", () => {
