@@ -13,15 +13,9 @@ import {
   ReservationLostError,
   startReservationHeartbeat,
 } from "../routing/reservation-heartbeat.ts";
+import { nextStreamEvent } from "./abortable-iterator.ts";
 import { ReplayBoundary } from "./replay-boundary.ts";
 import { canRotateBeforeOutput } from "./stream-attempt.ts";
-import {
-  nextStreamEvent,
-  resolveStreamSilenceTimeoutMs,
-  StreamSilenceTimeoutError,
-  type StreamTimers,
-  systemStreamTimers,
-} from "./stream-silence.ts";
 
 export interface RouteAttemptRequest {
   excludedAccountIds: ReadonlySet<string>;
@@ -59,7 +53,6 @@ export interface RoutedStreamDependencies {
   release(leaseToken: string): Promise<void>;
   renew(leaseToken: string, ttlMs: number): Promise<boolean>;
   maxAttempts(): number;
-  timers?: StreamTimers;
 }
 
 class RouteUnavailableError extends Error {
@@ -83,7 +76,6 @@ export function createRoutedStream(
     const output = createAssistantMessageEventStream();
 
     void (async () => {
-      const streamSilenceTimeoutMs = resolveStreamSilenceTimeoutMs(options?.timeoutMs);
       const excludedAccountIds = new Set<string>();
       let lastFailure: unknown;
 
@@ -96,9 +88,7 @@ export function createRoutedStream(
           ...(options ? { options } : {}),
         });
         if (selection.kind === "unavailable") {
-          if (!(lastFailure instanceof StreamSilenceTimeoutError)) {
-            lastFailure = new RouteUnavailableError(selection.reason);
-          }
+          lastFailure = new RouteUnavailableError(selection.reason);
           break;
         }
 
@@ -125,34 +115,24 @@ export function createRoutedStream(
           providerAttempt: while (true) {
             let pendingStart: Extract<AssistantMessageEvent, { type: "start" }> | undefined;
             let latestPartial: AssistantMessage | undefined;
-            const deadline = createStreamDeadline({
-              heartbeatSignal: heartbeat.signal,
-              ...(options?.signal ? { externalSignal: options.signal } : {}),
-              timeoutMs: streamSilenceTimeoutMs,
-              timers: dependencies.timers ?? systemStreamTimers,
-            });
             try {
-              deadline.arm("pre-output");
               const base = dependencies.baseStream(model, context, {
                 ...options,
                 apiKey: credential.accessToken,
-                signal: deadline.signal,
-                timeoutMs: streamSilenceTimeoutMs,
+                signal: heartbeat.signal,
               });
               const iterator = base[Symbol.asyncIterator]();
               while (true) {
-                const next = await nextStreamEvent(iterator, deadline.signal);
+                const next = await nextStreamEvent(iterator, heartbeat.signal);
                 if (next.done) break;
                 const event = next.value;
                 if (event.type === "start") {
                   pendingStart = event;
-                  deadline.arm("pre-output");
                   continue;
                 }
                 boundary.observe(event);
 
                 if (event.type === "error") {
-                  deadline.stop();
                   const classifiedInput = event.error.errorMessage ?? event.error;
                   const failure = dependencies.classifyFailure(classifiedInput);
                   lastFailure = classifiedInput;
@@ -202,14 +182,12 @@ export function createRoutedStream(
 
                 if (event.type !== "done") {
                   latestPartial = event.partial;
-                  deadline.arm(boundary.isReplaySafe() ? "pre-output" : "post-output");
                 }
                 if (pendingStart) {
                   output.push(pendingStart);
                   pendingStart = undefined;
                 }
                 if (event.type === "done") {
-                  deadline.stop();
                   dependencies.recordSuccess(lease.accountId, options?.sessionId);
                   await heartbeat.stop();
                   await release();
@@ -219,28 +197,13 @@ export function createRoutedStream(
                 output.push(event);
               }
 
-              deadline.stop();
               lastFailure = new Error("Codex stream ended without a terminal event");
               await heartbeat.stop();
               await release();
               output.push(errorEvent(model, "error", lastFailure));
               return;
             } catch (error) {
-              deadline.stop();
               lastFailure = error;
-              if (error instanceof StreamSilenceTimeoutError && !options?.signal?.aborted) {
-                if (boundary.isReplaySafe()) {
-                  excludedAccountIds.add(lease.accountId);
-                  break;
-                }
-                await heartbeat.stop();
-                await release();
-                if (pendingStart) {
-                  output.push(pendingStart);
-                }
-                output.push(errorEvent(model, "error", error, latestPartial));
-                return;
-              }
               const failure = dependencies.classifyFailure(error);
               if (
                 failure.kind === "auth-retry" &&
@@ -310,11 +273,9 @@ export function createRoutedStream(
         errorEvent(
           model,
           "error",
-          lastFailure instanceof StreamSilenceTimeoutError
+          lastFailure instanceof RouteUnavailableError
             ? lastFailure
-            : lastFailure instanceof RouteUnavailableError
-              ? lastFailure
-              : new RouteUnavailableError("no_eligible_accounts"),
+            : new RouteUnavailableError("no_eligible_accounts"),
         ),
       );
     })().catch((error) => {
@@ -358,42 +319,8 @@ function sanitizedErrorMessage(reason: "aborted" | "error", error: unknown): str
       ? error.message
       : "The Codex request was cancelled";
   }
-  if (
-    error instanceof ReservationLostError ||
-    error instanceof RouteUnavailableError ||
-    error instanceof StreamSilenceTimeoutError
-  ) {
+  if (error instanceof ReservationLostError || error instanceof RouteUnavailableError) {
     return error.message;
   }
   return "No Codex account completed the request";
-}
-
-function createStreamDeadline(options: {
-  heartbeatSignal: AbortSignal;
-  externalSignal?: AbortSignal;
-  timeoutMs: number;
-  timers: StreamTimers;
-}): {
-  signal: AbortSignal;
-  arm(phase: "pre-output" | "post-output"): void;
-  stop(): void;
-} {
-  const timeout = new AbortController();
-  const signal = AbortSignal.any([options.heartbeatSignal, timeout.signal]);
-  let timer: ReturnType<StreamTimers["setTimeout"]> | undefined;
-  const stop = () => {
-    timer?.clear();
-    timer = undefined;
-  };
-  return {
-    signal,
-    arm(phase) {
-      stop();
-      timer = options.timers.setTimeout(() => {
-        if (options.externalSignal?.aborted || options.heartbeatSignal.aborted) return;
-        timeout.abort(new StreamSilenceTimeoutError(phase));
-      }, options.timeoutMs);
-    },
-    stop,
-  };
 }
