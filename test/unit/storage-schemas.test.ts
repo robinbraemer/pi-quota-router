@@ -34,6 +34,32 @@ const frozenOldV1Config = {
     retryCooldownMs: 3_600_000,
   },
 };
+const FrozenV1RouterConfigSchema = z
+  .object({
+    version: z.literal(1),
+    enabled: z.boolean(),
+    manualAccountId: z.string().min(1).optional(),
+    usageFreshnessMs: z.number().int().positive(),
+    maxRotationAttempts: z.number().int().positive(),
+    maxRecoveryWaitMs: z.number().int().nonnegative(),
+    reservationTtlMs: z.number().int().positive(),
+    scoreHysteresisRatio: z.number().min(0).max(1),
+    headroom: z
+      .object({
+        shortWindowMinimumPercent: z.number().min(0).max(100),
+        weeklyMinimumPercent: z.number().min(0).max(100),
+      })
+      .strict(),
+    priming: z
+      .object({
+        enabled: z.boolean(),
+        confirmedFirstUseRollingWindow: z.boolean(),
+        maximumPerSweep: z.number().int().positive(),
+        retryCooldownMs: z.number().int().positive(),
+      })
+      .strict(),
+  })
+  .strict();
 const frozenOldV1State = {
   version: 1 as const,
   usageSnapshots: [],
@@ -164,10 +190,11 @@ describe("router storage contracts", () => {
     });
   });
 
-  test("accepts version-one config and migrates version-one runtime state", () => {
+  test("keeps version-one config readable by strict rollback versions", () => {
     expect(RouterConfigSchema.parse(defaultConfig)).toEqual(defaultConfig);
     expect(RuntimeStateFileSchema.parse(defaultRuntimeState)).toEqual(defaultRuntimeState);
     expect(RouterConfigSchema.parse(frozenOldV1Config)).toEqual(frozenOldV1Config);
+    expect(FrozenV1RouterConfigSchema.parse(defaultConfig)).toEqual(defaultConfig);
     expect(RuntimeStateFileSchema.parse(frozenOldV1State)).toEqual({
       ...frozenOldV1State,
       version: 2,
