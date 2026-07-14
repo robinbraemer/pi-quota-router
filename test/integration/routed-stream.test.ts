@@ -7,6 +7,7 @@ import type {
   SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
 import { classifyFailure } from "../../src/recovery/failure-classifier.ts";
+import { ReservationLostError } from "../../src/routing/reservation-heartbeat.ts";
 import {
   createRoutedStream,
   type RoutedStreamDependencies,
@@ -897,6 +898,92 @@ describe("RoutedStream", () => {
       finishPeer?.();
       await Promise.allSettled([lostPromise, peerPromise]);
     }
+  });
+
+  test("normalizes rejected renewal while preserving visible output", async () => {
+    const visiblePartial: AssistantMessage = {
+      ...message(),
+      content: [{ type: "text", text: "partial before rejected renewal" }],
+      usage: {
+        input: 13,
+        output: 8,
+        cacheRead: 5,
+        cacheWrite: 2,
+        reasoning: 3,
+        totalTokens: 28,
+        cost: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, total: 10 },
+      },
+    };
+    const renewalCause = new Error("synthetic internal renewal failure");
+    let heartbeatReason: unknown;
+    const baseStream = ((
+      _model: Model<"openai-codex-responses">,
+      _context: Context,
+      options?: SimpleStreamOptions,
+    ) =>
+      (async function* () {
+        yield start();
+        yield {
+          type: "text_start",
+          contentIndex: 0,
+          partial: message(),
+        } as AssistantMessageEvent;
+        yield {
+          type: "text_delta",
+          contentIndex: 0,
+          delta: "partial before rejected renewal",
+          partial: visiblePartial,
+        } as AssistantMessageEvent;
+        const signal = options?.signal;
+        if (!signal) throw new Error("renewal fixture requires a heartbeat signal");
+        signal.throwIfAborted();
+        await new Promise<void>((_resolve, reject) => {
+          signal.addEventListener(
+            "abort",
+            () => {
+              heartbeatReason = signal.reason;
+              reject(signal.reason);
+            },
+            { once: true },
+          );
+        });
+      })()) as unknown as RoutedStreamDependencies["baseStream"];
+    const setup = dependencies(["a"], baseStream);
+    setup.value.selectAndReserve = async () => ({
+      kind: "selected",
+      lease: {
+        accountId: "a",
+        leaseToken: "rejected-token",
+        reservationTtlMs: 15,
+      },
+    });
+    setup.value.renew = async () => {
+      throw renewalCause;
+    };
+
+    const events = await collect(createRoutedStream(setup.value)(model, context));
+    const terminal = events.at(-1);
+
+    expect(events.map((event) => event.type)).toEqual([
+      "start",
+      "text_start",
+      "text_delta",
+      "error",
+    ]);
+    expect(heartbeatReason).toBeInstanceOf(ReservationLostError);
+    if (!(heartbeatReason instanceof ReservationLostError)) {
+      throw new Error("expected normalized reservation loss");
+    }
+    expect(heartbeatReason.cause).toBe(renewalCause);
+    expect(terminal?.type).toBe("error");
+    if (terminal?.type !== "error") throw new Error("expected renewal rejection error");
+    expect(terminal.error.content).toEqual(visiblePartial.content);
+    expect(terminal.error.usage).toEqual(visiblePartial.usage);
+    expect(terminal.error.errorMessage).toBe("The Codex account reservation could not be renewed");
+    expect(JSON.stringify(events)).not.toContain(renewalCause.message);
+    expect(setup.released).toEqual(["rejected-token"]);
+    expect(setup.recorded).toEqual([]);
+    expect(setup.succeeded).toEqual([]);
   });
 
   test("enforces the maximum rotation attempt count", async () => {
