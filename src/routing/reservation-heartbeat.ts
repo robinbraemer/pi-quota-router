@@ -3,8 +3,11 @@ import { setTimeout as delay } from "node:timers/promises";
 export class ReservationLostError extends Error {
   override readonly name = "ReservationLostError";
 
-  constructor() {
-    super("The Codex account reservation could not be renewed");
+  constructor(cause?: unknown) {
+    super(
+      "The Codex account reservation could not be renewed",
+      cause === undefined ? undefined : { cause },
+    );
   }
 }
 
@@ -30,7 +33,13 @@ export function startReservationHeartbeat(options: {
         }
         throw error;
       }
-      if (!(await options.renew(options.leaseToken, options.ttlMs))) {
+      let renewed: boolean;
+      try {
+        renewed = await options.renew(options.leaseToken, options.ttlMs);
+      } catch (error) {
+        throw new ReservationLostError(error);
+      }
+      if (!renewed) {
         throw new ReservationLostError();
       }
     }

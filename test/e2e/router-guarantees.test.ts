@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { appendFile, readdir, readFile } from "node:fs/promises";
+import { access, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   type AssistantMessageEvent,
@@ -44,12 +44,160 @@ const NOW = 2_000_000_000_000;
 const model = Object.values(OPENAI_CODEX_MODELS)[0] as Model<"openai-codex-responses">;
 const context = { messages: [] } as Context;
 const cleanups: Array<() => Promise<void>> = [];
+const WORKER_READY_TIMEOUT_MS = 5_000;
+type StagedWorkerState = "released" | "exited-before-ready" | "exited-before-release";
 
 setDefaultTimeout(30_000);
 
 afterEach(async () => {
   await Promise.all(cleanups.splice(0).map((cleanup) => cleanup()));
 });
+
+async function selectPrimerFenceWorker(input: {
+  fixture: { directory: string; file: string };
+  requestId: string;
+  accountIds?: string;
+  environment?: Record<string, string>;
+  startBarrier?: { path: string; releaseDelayMs: number; readyAcknowledgement?: string };
+  command?: string[];
+}): Promise<{ accountId?: string }> {
+  const worker = new URL("../helpers/worker-select.ts", import.meta.url).pathname;
+  const child = Bun.spawn(
+    input.command ?? [
+      process.execPath,
+      worker,
+      input.fixture.file,
+      input.requestId,
+      input.accountIds ?? "a",
+      "false",
+    ],
+    {
+      stdout: "pipe",
+      stderr: "pipe",
+      env: {
+        ...process.env,
+        ...input.environment,
+        ...(input.startBarrier
+          ? { PI_QUOTA_ROUTER_TEST_START_BARRIER: input.startBarrier.path }
+          : {}),
+      },
+    },
+  );
+  const result = Promise.all([
+    child.exited,
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+  ]);
+  try {
+    let stagedWorkerState: StagedWorkerState | undefined;
+    if (input.startBarrier) {
+      stagedWorkerState = await releaseStagedWorker({
+        barrier: input.startBarrier.path,
+        requestId: input.requestId,
+        releaseDelayMs: input.startBarrier.releaseDelayMs,
+        ...(input.startBarrier.readyAcknowledgement
+          ? { readyAcknowledgement: input.startBarrier.readyAcknowledgement }
+          : {}),
+        workerExited: child.exited,
+      });
+    }
+    const [exitCode, stdout, stderr] = await result;
+    if (
+      stagedWorkerState === "exited-before-ready" ||
+      stagedWorkerState === "exited-before-release"
+    ) {
+      const milestone =
+        stagedWorkerState === "exited-before-ready"
+          ? "staged worker ready"
+          : "staged worker release";
+      throw new Error(
+        [
+          `foreground worker exited with code ${exitCode} before ${milestone}`,
+          `stdout:\n${stdout}`,
+          `stderr:\n${stderr}`,
+        ].join("\n"),
+      );
+    }
+    if (exitCode !== 0 || stderr !== "") {
+      throw new Error(
+        [
+          `foreground worker exited with code ${exitCode}`,
+          `stdout:\n${stdout}`,
+          `stderr:\n${stderr}`,
+        ].join("\n"),
+      );
+    }
+    try {
+      return JSON.parse(stdout) as { accountId?: string };
+    } catch (error) {
+      throw new Error(`foreground worker returned invalid JSON\nstdout:\n${stdout}`, {
+        cause: error,
+      });
+    }
+  } finally {
+    if (child.exitCode === null) child.kill();
+    await child.exited;
+  }
+}
+
+async function releaseStagedWorker(input: {
+  barrier: string;
+  requestId: string;
+  releaseDelayMs: number;
+  readyAcknowledgement?: string;
+  workerExited: Promise<number>;
+}): Promise<StagedWorkerState> {
+  const polling = new AbortController();
+  const ready = waitForFile(`${input.barrier}.${input.requestId}.ready`, polling.signal);
+  let readinessTimer: ReturnType<typeof setTimeout> | undefined;
+  let releaseTimer: ReturnType<typeof setTimeout> | undefined;
+  const readinessTimeout = new Promise<never>((_resolve, reject) => {
+    readinessTimer = setTimeout(() => {
+      reject(new Error("staged worker readiness timed out"));
+    }, WORKER_READY_TIMEOUT_MS);
+  });
+  try {
+    const state = await Promise.race([
+      ready.then(() => "ready" as const),
+      input.workerExited.then(() => "exited" as const),
+      readinessTimeout,
+    ]);
+    if (readinessTimer !== undefined) {
+      clearTimeout(readinessTimer);
+      readinessTimer = undefined;
+    }
+    if (state === "exited") return "exited-before-ready";
+    if (input.readyAcknowledgement) {
+      await writeFile(input.readyAcknowledgement, "ready observed", "utf8");
+    }
+    const releaseDelay = new Promise<true>((resolve) => {
+      releaseTimer = setTimeout(() => resolve(true), input.releaseDelayMs);
+    });
+    const release = await Promise.race([releaseDelay, input.workerExited.then(() => false)]);
+    if (!release) return "exited-before-release";
+    await writeFile(input.barrier, "release", "utf8");
+    return "released";
+  } finally {
+    if (readinessTimer !== undefined) clearTimeout(readinessTimer);
+    if (releaseTimer !== undefined) clearTimeout(releaseTimer);
+    polling.abort();
+    await ready.catch(() => undefined);
+  }
+}
+
+async function waitForFile(path: string, signal: AbortSignal): Promise<void> {
+  while (true) {
+    signal.throwIfAborted();
+    if (
+      await access(path)
+        .then(() => true)
+        .catch(() => false)
+    ) {
+      return;
+    }
+    await Bun.sleep(1);
+  }
+}
 
 describe("quota router end-to-end guarantees", () => {
   test("selects a healthy account only after fetching fresh usage", async () => {
@@ -167,85 +315,8 @@ describe("quota router end-to-end guarantees", () => {
         },
       ],
     }));
-    const worker = new URL("../helpers/worker-select.ts", import.meta.url).pathname;
-    const select = async (requestId: string, accountIds = "a") => {
-      const diagnosticPath = join(fixture.directory, `primer-fence-${requestId}.jsonl`);
-      const startedAt = process.hrtime.bigint();
-      const diagnostic = async (
-        stage: string,
-        detail?: Record<string, number | string | boolean | null | string[]>,
-      ) => {
-        await appendFile(
-          diagnosticPath,
-          `${JSON.stringify({
-            source: "parent",
-            stage,
-            elapsedMs: Number(process.hrtime.bigint() - startedAt) / 1_000_000,
-            processId: process.pid,
-            ...detail,
-          })}\n`,
-          "utf8",
-        );
-      };
-      await diagnostic("spawn-requested");
-      const child = Bun.spawn(
-        [process.execPath, worker, fixture.file, requestId, accountIds, "false"],
-        {
-          stdout: "pipe",
-          stderr: "pipe",
-          env: { ...process.env, PI_QUOTA_ROUTER_TEST_DIAGNOSTIC_PATH: diagnosticPath },
-        },
-      );
-      await diagnostic("child-pid-available", { childPid: child.pid });
-      const result = Promise.all([
-        child.exited.then(async (exitCode) => {
-          await diagnostic("child-exit-settled", { exitCode });
-          return exitCode;
-        }),
-        new Response(child.stdout).text().then(async (stdout) => {
-          await diagnostic("stdout-closed", { bytes: stdout.length });
-          return stdout;
-        }),
-        new Response(child.stderr).text().then(async (stderr) => {
-          await diagnostic("stderr-closed", { bytes: stderr.length });
-          return stderr;
-        }),
-      ]);
-      let deadlineSnapshot: { childExitCode: number | null; parentResources: string[] } | undefined;
-      try {
-        const [exitCode, stdout, stderr] = await Promise.race([
-          result,
-          Bun.sleep(5_000).then(async () => {
-            deadlineSnapshot = {
-              childExitCode: child.exitCode,
-              parentResources: process.getActiveResourcesInfo().sort(),
-            };
-            await diagnostic("deadline", deadlineSnapshot);
-            throw new Error("foreground worker timed out");
-          }),
-        ]);
-        expect(exitCode).toBe(0);
-        expect(stderr).toBe("");
-        return JSON.parse(stdout) as { accountId?: string };
-      } catch (error) {
-        if (!deadlineSnapshot) throw error;
-        if (child.exitCode === null) child.kill();
-        const [exitCode, stdout, stderr] = await result;
-        await diagnostic("timeout-cleanup-settled", {
-          exitCode,
-          stdoutBytes: stdout.length,
-          stderrBytes: stderr.length,
-        });
-        const stages = await readFile(diagnosticPath, "utf8").catch(() => "");
-        throw new Error(
-          `foreground worker timed out; diagnostics=${JSON.stringify({ deadlineSnapshot, stages })}`,
-          { cause: error },
-        );
-      } finally {
-        if (child.exitCode === null) child.kill();
-        await child.exited;
-      }
-    };
+    const select = (requestId: string, accountIds = "a") =>
+      selectPrimerFenceWorker({ fixture, requestId, accountIds });
 
     expect((await select("primer-blocked", "a,b")).accountId).toBe("b");
     expect((await stateStore.read()).lastSelection?.candidates[0]?.rejectionCode).toBe(
@@ -268,6 +339,133 @@ describe("quota router end-to-end guarantees", () => {
       ],
     }));
     expect((await select("sweep-does-not-veto")).accountId).toBe("a");
+  });
+
+  test("waits for a staged healthy foreground worker before asserting primer fencing", async () => {
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    const stateStore = createAtomicJsonStore<RuntimeStateFile>({
+      path: fixture.file,
+      schema: RuntimeStateFileSchema,
+      createDefault: () => structuredClone(defaultRuntimeState),
+    });
+    await stateStore.update((state) => ({
+      ...state,
+      reservations: [
+        {
+          accountId: "a",
+          leaseToken: "synthetic-staged-primer",
+          owner: { processId: 7, sessionId: "primer", requestId: "primer" },
+          createdAt: NOW,
+          expiresAt: NOW + 60_000,
+          kind: "primer",
+        },
+      ],
+    }));
+    const barrier = join(fixture.directory, "staged-worker-release");
+    const startedAt = Date.now();
+    expect(
+      (
+        await selectPrimerFenceWorker({
+          fixture,
+          requestId: "staged-worker",
+          accountIds: "a,b",
+          startBarrier: { path: barrier, releaseDelayMs: 5_100 },
+        })
+      ).accountId,
+    ).toBe("b");
+    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(5_000);
+    expect(
+      await access(`${barrier}.staged-worker.ready`)
+        .then(() => true)
+        .catch(() => false),
+    ).toBeTrue();
+  });
+
+  test("preserves worker failure output when a staged worker exits before ready", async () => {
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    const barrierParent = join(fixture.directory, "blocked-staged-worker-barrier");
+    await writeFile(barrierParent, "not a directory", "utf8");
+
+    let failure: unknown;
+    try {
+      await selectPrimerFenceWorker({
+        fixture,
+        requestId: "failed-staged-worker",
+        startBarrier: {
+          path: join(barrierParent, "release"),
+          releaseDelayMs: 0,
+        },
+      });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toBeInstanceOf(Error);
+    if (!(failure instanceof Error)) throw new Error("expected staged worker failure");
+    expect(failure.message).toContain("foreground worker exited with code");
+    expect(failure.message).toContain("EEXIST");
+    expect(failure.message).not.toContain("staged worker readiness timed out");
+  });
+
+  test("rejects a clean worker exit before the staged ready marker", async () => {
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    const workerOutput = `${JSON.stringify({ accountId: "a" })}\n`;
+
+    let failure: unknown;
+    try {
+      await selectPrimerFenceWorker({
+        fixture,
+        requestId: "clean-pre-ready-exit",
+        command: [process.execPath, "-e", `process.stdout.write(${JSON.stringify(workerOutput)})`],
+        startBarrier: {
+          path: join(fixture.directory, "clean-pre-ready-release"),
+          releaseDelayMs: 5_100,
+        },
+      });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toBeInstanceOf(Error);
+    if (!(failure instanceof Error)) throw new Error("expected staged worker protocol failure");
+    expect(failure.message).toContain("before staged worker ready");
+    expect(failure.message).toContain(workerOutput.trim());
+    expect(failure.message).not.toContain("staged worker readiness timed out");
+  });
+
+  test("rejects a clean worker exit after ready but before parent release", async () => {
+    const fixture = await createStorageFixture();
+    cleanups.push(fixture.cleanup);
+    const requestId = "clean-post-ready-exit";
+    const barrier = join(fixture.directory, "clean-post-ready-release");
+    const ready = `${barrier}.${requestId}.ready`;
+    const readyAcknowledgement = `${barrier}.${requestId}.observed`;
+    const workerOutput = `${JSON.stringify({ accountId: "a" })}\n`;
+
+    let failure: unknown;
+    try {
+      await selectPrimerFenceWorker({
+        fixture,
+        requestId,
+        command: [
+          process.execPath,
+          "-e",
+          `await Bun.write(${JSON.stringify(ready)}, "ready"); while (!(await Bun.file(${JSON.stringify(readyAcknowledgement)}).exists())) await Bun.sleep(1); process.stdout.write(${JSON.stringify(workerOutput)})`,
+        ],
+        startBarrier: { path: barrier, releaseDelayMs: 5_100, readyAcknowledgement },
+      });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toBeInstanceOf(Error);
+    if (!(failure instanceof Error)) throw new Error("expected staged worker protocol failure");
+    expect(failure.message).toContain("before staged worker release");
+    expect(failure.message).toContain(workerOutput.trim());
+    expect(failure.message).not.toContain("staged worker readiness timed out");
   });
 
   test("a held foreground worker fences primer acquisition across processes", async () => {

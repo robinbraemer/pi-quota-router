@@ -7,14 +7,11 @@ import type {
   SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
 import { classifyFailure } from "../../src/recovery/failure-classifier.ts";
+import { ReservationLostError } from "../../src/routing/reservation-heartbeat.ts";
 import {
   createRoutedStream,
   type RoutedStreamDependencies,
 } from "../../src/stream/routed-stream.ts";
-import {
-  resolveStreamSilenceTimeoutMs,
-  StreamSilenceTimeoutError,
-} from "../../src/stream/stream-silence.ts";
 import {
   eventStream,
   message,
@@ -478,96 +475,121 @@ describe("RoutedStream", () => {
     expect(setup.renewed.length).toBeGreaterThan(0);
   });
 
-  test("uses the clamped provider timeout for silent pre-output rotation", async () => {
+  test("leaves an omitted provider timeout unset across more than five minutes of normalized silence", async () => {
     const timers = new FakeTimers();
-    const controller = new AbortController();
     const providerTimeouts: Array<number | undefined> = [];
-    let firstAbortReason: unknown;
     let entered: (() => void) | undefined;
-    let renewed: (() => void) | undefined;
+    let finish: (() => void) | undefined;
     const enteredAttempt = new Promise<void>((resolve) => {
       entered = resolve;
     });
-    const firstRenewal = new Promise<void>((resolve) => {
-      renewed = resolve;
+    const providerMayFinish = new Promise<void>((resolve) => {
+      finish = resolve;
     });
-    const setup = dependencies(["a", "b"], (_model, _context, options) => {
+    const setup = dependencies(["a"], (_model, _context, options) => {
       providerTimeouts.push(options?.timeoutMs);
-      if (options?.apiKey === "token-b") return eventStream(successfulText());
       return (async function* () {
         entered?.();
-        const signal = options?.signal;
-        if (!signal) throw new Error("missing routed abort signal");
-        await new Promise<void>((_resolve, reject) => {
-          signal.addEventListener(
-            "abort",
-            () => {
-              firstAbortReason = signal.reason;
-              reject(signal.reason);
-            },
-            { once: true },
-          );
-        });
+        await providerMayFinish;
+        for (const event of successfulText()) yield event;
       })() as unknown as ReturnType<RoutedStreamDependencies["baseStream"]>;
     });
-    setup.value.selectAndReserve = async ({ excludedAccountIds }) => {
-      const accountId = ["a", "b"].find((account) => !excludedAccountIds.has(account));
-      if (!accountId) return { kind: "unavailable", reason: "no_eligible_accounts" };
-      setup.selected.push(accountId);
-      return {
-        kind: "selected",
-        lease: { accountId, leaseToken: `lease-${accountId}`, reservationTtlMs: 3 },
-      };
-    };
-    setup.value.renew = async (leaseToken) => {
-      if (leaseToken === "lease-a") renewed?.();
-      setup.renewed.push(leaseToken);
-      return true;
-    };
-    setup.value.timers = timers;
-    const routed = createRoutedStream(setup.value);
-    const stream = routed(model, context, { signal: controller.signal, timeoutMs: 1 });
+    (
+      setup.value as RoutedStreamDependencies & {
+        timers: ControlledTimers;
+      }
+    ).timers = timers;
+    const stream = createRoutedStream(setup.value)(model, context);
     let settled = false;
-    const result = stream.result().finally(() => {
+    const result = collect(stream).finally(() => {
       settled = true;
     });
 
     try {
       await enteredAttempt;
-      await firstRenewal;
-      expect(settled).toBeFalse();
-      timers.advanceBy(29_999);
-      await flushAsyncWork();
-      expect(settled).toBeFalse();
-      timers.advanceBy(1);
+      timers.advanceBy(300_001);
       await flushAsyncWork();
 
-      expect(settled).toBeTrue();
-      expect(providerTimeouts).toEqual([30_000, 30_000]);
-      expect(firstAbortReason).toBeInstanceOf(StreamSilenceTimeoutError);
-      expect((firstAbortReason as StreamSilenceTimeoutError).phase).toBe("pre-output");
-      expect(setup.selected).toEqual(["a", "b"]);
-      expect(setup.recorded).toEqual([]);
-      expect(setup.released.sort()).toEqual(["lease-a", "lease-b"]);
+      expect(settled).toBeFalse();
+      expect(providerTimeouts).toEqual([undefined]);
+      finish?.();
+      expect((await result).at(-1)?.type).toBe("done");
+      expect(setup.released).toEqual(["lease-a"]);
     } finally {
-      controller.abort(new Error("test cleanup"));
+      finish?.();
       await result;
     }
   });
 
-  test("terminates a silent post-output attempt without replay or failure persistence", async () => {
-    const timers = new FakeTimers();
+  test("forwards a long provider timeout unchanged and rotates only after a concrete failure", async () => {
+    const providerTimeouts: Array<number | undefined> = [];
+    const setup = dependencies(["a", "b"], (_model, _context, options) => {
+      providerTimeouts.push(options?.timeoutMs);
+      if (options?.apiKey === "token-a") {
+        throw Object.assign(new Error("Codex provider timeout"), { code: "ETIMEDOUT" });
+      }
+      return eventStream(successfulText());
+    });
+
+    const events = await collect(
+      createRoutedStream(setup.value)(model, context, { timeoutMs: 3_600_000 }),
+    );
+
+    expect(events.at(-1)?.type).toBe("done");
+    expect(providerTimeouts).toEqual([3_600_000, 3_600_000]);
+    expect(setup.selected).toEqual(["a", "b"]);
+    expect(setup.recorded).toEqual(["a"]);
+    expect(setup.released.sort()).toEqual(["lease-a", "lease-b"]);
+  });
+
+  test("rotates provider timeout terminal events before output", async () => {
+    for (const timeoutMessage of [
+      "Codex SSE response headers timed out after 30000ms",
+      "WebSocket idle timeout after 300000ms",
+    ]) {
+      const setup = dependencies(["a", "b"], (_model, _context, options) =>
+        options?.apiKey === "token-a"
+          ? eventStream([
+              start(),
+              {
+                type: "error",
+                reason: "error",
+                error: message("error", timeoutMessage),
+              },
+            ])
+          : eventStream(successfulText()),
+      );
+
+      const events = await collect(createRoutedStream(setup.value)(model, context));
+
+      expect(events.at(-1)?.type).toBe("done");
+      expect(setup.selected).toEqual(["a", "b"]);
+      expect(setup.recorded).toEqual(["a"]);
+      expect(setup.released.sort()).toEqual(["lease-a", "lease-b"]);
+    }
+  });
+
+  test("external cancellation after output preserves the latest partial and releases once", async () => {
+    const visiblePartial: AssistantMessage = {
+      ...message(),
+      content: [{ type: "text", text: "partial before cancellation" }],
+      usage: {
+        input: 13,
+        output: 8,
+        cacheRead: 5,
+        cacheWrite: 3,
+        reasoning: 4,
+        totalTokens: 29,
+        cost: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, total: 10 },
+      },
+    };
     const controller = new AbortController();
     let entered: (() => void) | undefined;
-    let renewed: (() => void) | undefined;
     const enteredAttempt = new Promise<void>((resolve) => {
       entered = resolve;
     });
-    const firstRenewal = new Promise<void>((resolve) => {
-      renewed = resolve;
-    });
     const setup = dependencies(
-      ["a", "b"],
+      ["a"],
       (_model, _context, options) =>
         (async function* () {
           yield start();
@@ -575,6 +597,12 @@ describe("RoutedStream", () => {
             type: "text_start",
             contentIndex: 0,
             partial: message(),
+          } as AssistantMessageEvent;
+          yield {
+            type: "text_delta",
+            contentIndex: 0,
+            delta: "partial before cancellation",
+            partial: visiblePartial,
           } as AssistantMessageEvent;
           entered?.();
           const signal = options?.signal;
@@ -584,162 +612,46 @@ describe("RoutedStream", () => {
           });
         })() as unknown as ReturnType<RoutedStreamDependencies["baseStream"]>,
     );
-    setup.value.selectAndReserve = async () => {
-      setup.selected.push("a");
-      return {
-        kind: "selected",
-        lease: { accountId: "a", leaseToken: "lease-a", reservationTtlMs: 3 },
-      };
-    };
-    setup.value.renew = async (leaseToken) => {
-      renewed?.();
-      setup.renewed.push(leaseToken);
-      return true;
-    };
-    setup.value.timers = timers;
-    const routed = createRoutedStream(setup.value);
-    const stream = routed(model, context, { signal: controller.signal });
-    let settled = false;
-    const result = stream.result().finally(() => {
-      settled = true;
-    });
-
-    try {
-      await enteredAttempt;
-      await firstRenewal;
-      expect(settled).toBeFalse();
-      timers.advanceBy(299_999);
-      await flushAsyncWork();
-      expect(settled).toBeFalse();
-      timers.advanceBy(1);
-      await flushAsyncWork();
-
-      expect(settled).toBeTrue();
-      const terminal = await result;
-      expect(terminal.stopReason).toBe("error");
-      expect(terminal.errorMessage).toBe("The Codex response stream became idle after output");
-      expect(setup.selected).toEqual(["a"]);
-      expect(setup.recorded).toEqual([]);
-      expect(setup.released).toEqual(["lease-a"]);
-    } finally {
-      controller.abort(new Error("test cleanup"));
-      await result;
-    }
-  });
-
-  test("external cancellation wins before, at, and immediately after a silence deadline", async () => {
-    for (const timing of ["before", "at", "after"] as const) {
-      const timers = new FakeTimers();
-      const controller = new AbortController();
-      let entered: (() => void) | undefined;
-      const enteredAttempt = new Promise<void>((resolve) => {
-        entered = resolve;
-      });
-      if (timing === "at") {
-        timers.setTimeout(() => controller.abort(new Error("user cancelled")), 30_000);
-      }
-      const setup = dependencies(
-        ["a"],
-        (_model, _context, options) =>
-          (async function* () {
-            yield start();
-            yield {
-              type: "text_start",
-              contentIndex: 0,
-              partial: message(),
-            } as AssistantMessageEvent;
-            entered?.();
-            const signal = options?.signal;
-            if (!signal) throw new Error("missing routed abort signal");
-            await new Promise<void>((_resolve, reject) => {
-              signal.addEventListener("abort", () => reject(signal.reason), { once: true });
-            });
-          })() as unknown as ReturnType<RoutedStreamDependencies["baseStream"]>,
-      );
-      setup.value.timers = timers;
-      const routed = createRoutedStream(setup.value);
-      const stream = routed(model, context, { signal: controller.signal, timeoutMs: 1 });
-
-      await enteredAttempt;
-      if (timing === "before") controller.abort(new Error("user cancelled"));
-      if (timing === "at") timers.advanceBy(30_000);
-      if (timing === "after") {
-        timers.advanceBy(30_000);
-        controller.abort(new Error("user cancelled"));
-      }
-      await flushAsyncWork();
-      const terminal = await stream.result();
-
-      expect(terminal.stopReason).toBe("aborted");
-      expect(terminal.errorMessage).toBe("The Codex request was cancelled");
-      expect(setup.recorded).toEqual([]);
-      expect(setup.released).toEqual(["lease-a"]);
-      expect(timers.pending).toBe(0);
-    }
-  });
-
-  test("a terminal event immediately before the idle deadline settles once and clears the timer", async () => {
-    const timers = new FakeTimers();
-    let finish: (() => void) | undefined;
-    const ready = new Promise<void>((resolve) => {
-      finish = resolve;
-    });
-    const setup = dependencies(
-      ["a"],
-      () =>
-        (async function* () {
-          yield start();
-          yield {
-            type: "text_start",
-            contentIndex: 0,
-            partial: message(),
-          } as AssistantMessageEvent;
-          await ready;
-          yield { type: "done", reason: "stop", message: message() } as AssistantMessageEvent;
-        })() as unknown as ReturnType<RoutedStreamDependencies["baseStream"]>,
+    const result = collect(
+      createRoutedStream(setup.value)(model, context, { signal: controller.signal }),
     );
-    setup.value.timers = timers;
-    const routed = createRoutedStream(setup.value);
-    const stream = routed(model, context, { timeoutMs: 300_001 });
 
-    await flushAsyncWork();
-    timers.advanceBy(299_999);
-    finish?.();
-    await flushAsyncWork();
-    timers.advanceBy(1);
-    await flushAsyncWork();
+    await enteredAttempt;
+    controller.abort(new Error("user cancelled"));
+    const events = await result;
 
-    const terminal = await stream.result();
-    expect(terminal.stopReason).toBe("stop");
+    expect(events.map((event) => event.type)).toEqual([
+      "start",
+      "text_start",
+      "text_delta",
+      "error",
+    ]);
+    const terminal = events.at(-1);
+    expect(terminal?.type).toBe("error");
+    if (terminal?.type !== "error") throw new Error("expected a terminal error event");
+    expect(terminal.error.content).toEqual(visiblePartial.content);
+    expect(terminal.error.usage).toEqual(visiblePartial.usage);
+    expect(terminal.error.stopReason).toBe("aborted");
+    expect(terminal.error.errorMessage).toBe("The Codex request was cancelled");
+    expect(setup.selected).toEqual(["a"]);
+    expect(setup.recorded).toEqual([]);
     expect(setup.released).toEqual(["lease-a"]);
-    expect(timers.pending).toBe(0);
-  });
-
-  test("rejects invalid request timeouts before selecting an account", async () => {
-    let baseStreamCalls = 0;
-    const setup = dependencies(["a"], () => {
-      baseStreamCalls += 1;
-      return eventStream(successfulText());
-    });
-
-    const terminal = await createRoutedStream(setup.value)(model, context, {
-      timeoutMs: Number.NaN,
-    }).result();
-
-    expect(terminal.stopReason).toBe("error");
-    expect(setup.selected).toEqual([]);
-    expect(baseStreamCalls).toBe(0);
-  });
-
-  test("clamps request silence budgets to the supported range", () => {
-    expect(resolveStreamSilenceTimeoutMs(undefined)).toBe(300_000);
-    expect(resolveStreamSilenceTimeoutMs(0)).toBe(30_000);
-    expect(resolveStreamSilenceTimeoutMs(45_000.9)).toBe(45_000);
-    expect(resolveStreamSilenceTimeoutMs(300_001)).toBe(300_000);
-    expect(() => resolveStreamSilenceTimeoutMs(-1)).toThrow("Invalid timeoutMs: -1");
   });
 
   test("isolates renewal loss to the affected lease token", async () => {
+    const visiblePartial: AssistantMessage = {
+      ...message(),
+      content: [{ type: "text", text: "partial before renewal loss" }],
+      usage: {
+        input: 17,
+        output: 9,
+        cacheRead: 5,
+        cacheWrite: 3,
+        reasoning: 4,
+        totalTokens: 34,
+        cost: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, total: 10 },
+      },
+    };
     let finishPeer: (() => void) | undefined;
     const peerHeld = new Promise<void>((resolve) => {
       finishPeer = resolve;
@@ -754,6 +666,17 @@ describe("RoutedStream", () => {
         if (options?.sessionId === "peer") {
           await peerHeld;
         } else {
+          yield {
+            type: "text_start",
+            contentIndex: 0,
+            partial: message(),
+          } as AssistantMessageEvent;
+          yield {
+            type: "text_delta",
+            contentIndex: 0,
+            delta: "partial before renewal loss",
+            partial: visiblePartial,
+          } as AssistantMessageEvent;
           const signal = options?.signal;
           if (!signal) throw new Error("renewal-loss fixture requires a heartbeat signal");
           signal.throwIfAborted();
@@ -785,7 +708,15 @@ describe("RoutedStream", () => {
       const lostLast = lost.at(-1);
       expect(lostLast?.type).toBe("error");
       if (lostLast?.type !== "error") throw new Error("expected renewal loss error event");
+      expect(lost.map((event) => event.type)).toEqual([
+        "start",
+        "text_start",
+        "text_delta",
+        "error",
+      ]);
       expect(lost.filter((event) => event.type === "error")).toHaveLength(1);
+      expect(lostLast.error.content).toEqual(visiblePartial.content);
+      expect(lostLast.error.usage).toEqual(visiblePartial.usage);
       expect(lostLast.error.errorMessage).toBe(
         "The Codex account reservation could not be renewed",
       );
@@ -802,6 +733,146 @@ describe("RoutedStream", () => {
       finishPeer?.();
       await Promise.allSettled([lostPromise, peerPromise]);
     }
+  });
+
+  test("does not poison or rotate an account after renewal rejection", async () => {
+    const renewalCause = Object.assign(new Error("reservation store timed out"), {
+      code: "ETIMEDOUT",
+    });
+    const baseStream = ((
+      _model: Model<"openai-codex-responses">,
+      _context: Context,
+      options?: SimpleStreamOptions,
+    ) => {
+      if (options?.apiKey === "token-b") {
+        return eventStream(successfulText());
+      }
+      return (async function* () {
+        yield start();
+        const signal = options?.signal;
+        if (!signal) throw new Error("renewal fixture requires a heartbeat signal");
+        signal.throwIfAborted();
+        await new Promise<void>((_resolve, reject) => {
+          signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+        });
+      })();
+    }) as unknown as RoutedStreamDependencies["baseStream"];
+    const setup = dependencies(["a", "b"], baseStream);
+    setup.value.selectAndReserve = async ({ excludedAccountIds }) => {
+      const accountId = ["a", "b"].find((candidate) => !excludedAccountIds.has(candidate));
+      if (!accountId) return { kind: "unavailable", reason: "no_eligible_accounts" };
+      setup.selected.push(accountId);
+      return {
+        kind: "selected",
+        lease: {
+          accountId,
+          leaseToken: `lease-${accountId}`,
+          reservationTtlMs: 15,
+        },
+      };
+    };
+    setup.value.renew = async (leaseToken) => {
+      if (leaseToken === "lease-a") throw renewalCause;
+      return true;
+    };
+
+    const events = await collect(createRoutedStream(setup.value)(model, context));
+    const terminal = events.at(-1);
+
+    expect(events.map((event) => event.type)).toEqual(["start", "error"]);
+    expect(terminal?.type).toBe("error");
+    if (terminal?.type !== "error") throw new Error("expected renewal rejection error");
+    expect(terminal.error.errorMessage).toBe("The Codex account reservation could not be renewed");
+    expect(setup.selected).toEqual(["a"]);
+    expect(setup.recorded).toEqual([]);
+    expect(setup.released).toEqual(["lease-a"]);
+    expect(setup.succeeded).toEqual([]);
+  });
+
+  test("normalizes rejected renewal while preserving visible output", async () => {
+    const visiblePartial: AssistantMessage = {
+      ...message(),
+      content: [{ type: "text", text: "partial before rejected renewal" }],
+      usage: {
+        input: 13,
+        output: 8,
+        cacheRead: 5,
+        cacheWrite: 2,
+        reasoning: 3,
+        totalTokens: 28,
+        cost: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, total: 10 },
+      },
+    };
+    const renewalCause = new Error("synthetic internal renewal failure");
+    let heartbeatReason: unknown;
+    const baseStream = ((
+      _model: Model<"openai-codex-responses">,
+      _context: Context,
+      options?: SimpleStreamOptions,
+    ) =>
+      (async function* () {
+        yield start();
+        yield {
+          type: "text_start",
+          contentIndex: 0,
+          partial: message(),
+        } as AssistantMessageEvent;
+        yield {
+          type: "text_delta",
+          contentIndex: 0,
+          delta: "partial before rejected renewal",
+          partial: visiblePartial,
+        } as AssistantMessageEvent;
+        const signal = options?.signal;
+        if (!signal) throw new Error("renewal fixture requires a heartbeat signal");
+        signal.throwIfAborted();
+        await new Promise<void>((_resolve, reject) => {
+          signal.addEventListener(
+            "abort",
+            () => {
+              heartbeatReason = signal.reason;
+              reject(signal.reason);
+            },
+            { once: true },
+          );
+        });
+      })()) as unknown as RoutedStreamDependencies["baseStream"];
+    const setup = dependencies(["a"], baseStream);
+    setup.value.selectAndReserve = async () => ({
+      kind: "selected",
+      lease: {
+        accountId: "a",
+        leaseToken: "rejected-token",
+        reservationTtlMs: 15,
+      },
+    });
+    setup.value.renew = async () => {
+      throw renewalCause;
+    };
+
+    const events = await collect(createRoutedStream(setup.value)(model, context));
+    const terminal = events.at(-1);
+
+    expect(events.map((event) => event.type)).toEqual([
+      "start",
+      "text_start",
+      "text_delta",
+      "error",
+    ]);
+    expect(heartbeatReason).toBeInstanceOf(ReservationLostError);
+    if (!(heartbeatReason instanceof ReservationLostError)) {
+      throw new Error("expected normalized reservation loss");
+    }
+    expect(heartbeatReason.cause).toBe(renewalCause);
+    expect(terminal?.type).toBe("error");
+    if (terminal?.type !== "error") throw new Error("expected renewal rejection error");
+    expect(terminal.error.content).toEqual(visiblePartial.content);
+    expect(terminal.error.usage).toEqual(visiblePartial.usage);
+    expect(terminal.error.errorMessage).toBe("The Codex account reservation could not be renewed");
+    expect(JSON.stringify(events)).not.toContain(renewalCause.message);
+    expect(setup.released).toEqual(["rejected-token"]);
+    expect(setup.recorded).toEqual([]);
+    expect(setup.succeeded).toEqual([]);
   });
 
   test("enforces the maximum rotation attempt count", async () => {
