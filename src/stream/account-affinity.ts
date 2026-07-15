@@ -77,8 +77,17 @@ export function createAccountAffinityCoordinator(
       if (shutDown) return;
       shutDown = true;
       shutdownAbort.abort(new Error("Account affinity coordinator shut down"));
-      for (const sessionId of states.keys()) closeSession(sessionId);
+      const sessionIds = [...states.keys()];
       states.clear();
+      let closeFailure: unknown;
+      for (const sessionId of sessionIds) {
+        try {
+          closeSession(sessionId);
+        } catch (error) {
+          closeFailure ??= error;
+        }
+      }
+      if (closeFailure !== undefined) throw closeFailure;
     },
   };
 }

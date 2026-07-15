@@ -90,4 +90,24 @@ describe("AccountAffinityCoordinator", () => {
     one.release();
     two.release();
   });
+
+  test("shutdown clears all tracked sessions even when one close fails", async () => {
+    const closed: string[] = [];
+    const coordinator = createAccountAffinityCoordinator((sessionId) => {
+      if (!sessionId) return;
+      closed.push(sessionId);
+      if (sessionId === "one") throw new Error("synthetic shutdown close failure");
+    });
+    const one = await coordinator.acquire("one");
+    const two = await coordinator.acquire("two");
+    const queued = coordinator.acquire("one");
+
+    expect(() => coordinator.shutdown()).toThrow("synthetic shutdown close failure");
+    await expect(queued).rejects.toThrow("Account affinity coordinator shut down");
+    expect(closed).toEqual(["one", "two"]);
+    coordinator.shutdown();
+    expect(closed).toEqual(["one", "two"]);
+    one.release();
+    two.release();
+  });
 });
