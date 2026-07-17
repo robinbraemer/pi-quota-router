@@ -47,7 +47,7 @@
     "zod": "4.3.6"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.5.3",
+    "@biomejs/biome": "2.5.4",
     "@earendil-works/pi-ai": "0.80.6",
     "@earendil-works/pi-coding-agent": "0.80.6",
     "@earendil-works/pi-tui": "0.80.6",
